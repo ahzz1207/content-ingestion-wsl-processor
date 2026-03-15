@@ -2,6 +2,8 @@ import json
 import os
 from pathlib import Path
 
+from content_ingestion.core.evidence import build_evidence_segment_id
+from content_ingestion.core.models import RelatedRef, StructuredResult, WarningItem
 from content_ingestion.inbox.processor import JobProcessor
 from content_ingestion.inbox.protocol import ensure_shared_inbox
 
@@ -102,6 +104,15 @@ def test_processor_writes_structured_asset_fields(tmp_path: Path) -> None:
     assert asset["metadata"]["handoff"]["video_download_mode"] == "audio"
     assert asset["metadata"]["capture"]["video_download_mode"] == "audio"
     assert asset["metadata"]["llm_processing"]["status"] == "skipped"
+    assert asset["metadata"]["llm_processing"]["content_policy_id"] == "video_text_first_v1"
+    assert asset["metadata"]["llm_processing"]["supported_input_modalities"] == ["text", "text_image"]
+    assert asset["metadata"]["llm_processing"]["text_input_modality"] == "text_image"
+    assert asset["metadata"]["llm_processing"]["multimodal_input_modality"] == "text_image"
+    assert asset["metadata"]["llm_processing"]["task_intent"] == "summarize_video_from_subtitle_and_whisper_transcript"
+    assert asset["metadata"]["llm_processing"]["skip_reason"] == "missing OPENAI_API_KEY"
+    assert asset["metadata"]["llm_processing"]["request_artifacts"] == {}
+    assert asset["metadata"]["llm_processing"]["handshake"]["schema_mode"] == "json_schema"
+    assert asset["metadata"]["llm_processing"]["handshake"]["content_policy_id"] == "video_text_first_v1"
 
 
 def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypatch) -> None:
@@ -159,6 +170,14 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1-mini")
     monkeypatch.setenv("CONTENT_INGESTION_MULTIMODAL_MODEL", "gpt-4.1")
+    transcript_evidence_id = build_evidence_segment_id(
+        kind="transcript",
+        source="analysis/transcript/transcript.json",
+        text="hello transcript",
+        sequence=1,
+        start_ms=0,
+        end_ms=1200,
+    )
 
     class _FakeResponses:
         def create(self, **kwargs):
@@ -169,12 +188,42 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
                     {
                         "output_text": json.dumps(
                             {
-                                "summary": "Summarized transcript",
-                                "analysis_items": ["Point 1"],
-                                "verification_items": [
-                                    {"claim": "Claim 1", "status": "supported", "evidence": ["Evidence 1"]}
+                                "summary": {
+                                    "headline": "Transcript summary",
+                                    "short_text": "Summarized transcript",
+                                },
+                                "key_points": [
+                                    {
+                                        "id": "kp-1",
+                                        "title": "Key point",
+                                        "details": "Important supporting detail",
+                                        "evidence_segment_ids": [transcript_evidence_id],
+                                    }
                                 ],
-                                "synthesis": "Synthesized answer",
+                                "analysis_items": [
+                                    {
+                                        "id": "an-1",
+                                        "kind": "fact",
+                                        "statement": "Point 1",
+                                        "evidence_segment_ids": [transcript_evidence_id],
+                                        "confidence": 0.92,
+                                    }
+                                ],
+                                "verification_items": [
+                                    {
+                                        "id": "ver-1",
+                                        "claim": "Claim 1",
+                                        "status": "supported",
+                                        "evidence_segment_ids": [transcript_evidence_id],
+                                        "rationale": "Evidence 1",
+                                        "confidence": 0.9,
+                                    }
+                                ],
+                                "synthesis": {
+                                    "final_answer": "Synthesized answer",
+                                    "next_steps": ["Archive"],
+                                    "open_questions": [],
+                                },
                             }
                         )
                     },
@@ -185,9 +234,21 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
                 {
                     "output_text": json.dumps(
                         {
-                            "visual_findings": ["Frame review"],
+                            "visual_findings": [
+                                {
+                                    "id": "vf-1",
+                                    "finding": "Frame review",
+                                    "evidence_frame_paths": ["analysis/frames/frame-001.jpg"],
+                                }
+                            ],
                             "verification_adjustments": [
-                                {"claim": "Claim 2", "status": "mixed", "rationale": "Frame mismatch"}
+                                {
+                                    "id": "ver-2",
+                                    "claim": "Claim 2",
+                                    "status": "partial",
+                                    "rationale": "Frame mismatch",
+                                    "evidence_frame_paths": ["analysis/frames/frame-001.jpg"],
+                                }
                             ],
                             "overall_assessment": "Visual review done",
                         }
@@ -271,13 +332,90 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
 
     assert asset["transcript_text"] == "hello transcript"
     assert "Transcript:" in asset["analysis_text"]
+    assert any(segment["id"].startswith("transcript-") for segment in asset["evidence_segments"])
     assert asset["metadata"]["media_processing"]["status"] == "pass"
     assert asset["summary"] == "Summarized transcript"
+    transcript_ids = [segment["id"] for segment in asset["evidence_segments"] if segment["kind"] == "transcript"]
+    assert transcript_ids
+    first_transcript_id = transcript_ids[0]
+    assert asset["result"]["summary"]["headline"] == "Transcript summary"
+    assert asset["result"]["summary"]["id"] == "summary-primary"
+    assert asset["result"]["summary"]["display"]["kind"] == "summary"
+    assert asset["result"]["summary"]["display"]["tone"] == "hero"
+    assert asset["result"]["summary"]["display"]["priority"] == 0
+    assert asset["result"]["key_points"][0]["id"] == "kp-1"
+    assert asset["result"]["key_points"][0]["resolved_evidence"]
+    assert asset["result"]["key_points"][0]["resolved_evidence"][0]["kind"] == "transcript"
+    assert asset["result"]["key_points"][0]["display"]["kind"] == "key_point"
+    assert asset["result"]["key_points"][0]["display"]["tone"] == "accent"
+    assert asset["result"]["key_points"][0]["display"]["priority"] == 101
+    assert asset["result"]["analysis_items"][0]["resolved_evidence"]
+    assert asset["result"]["analysis_items"][0]["resolved_evidence"][0]["id"] == first_transcript_id
+    assert asset["result"]["analysis_items"][0]["display"]["kind"] == "analysis_item"
+    assert asset["result"]["analysis_items"][0]["display"]["tone"] == "neutral"
+    assert asset["result"]["analysis_items"][0]["display"]["priority"] == 201
     assert asset["analysis_items"]
     assert asset["verification_items"]
+    assert asset["verification_items"][0]["resolved_evidence"]
+    assert asset["verification_items"][0]["resolved_evidence"][0]["kind"] == "transcript"
+    assert asset["verification_items"][0]["resolved_evidence"][0]["preview_text"] == "hello transcript"
+    assert asset["result"]["verification_items"][0]["resolved_evidence"]
+    assert asset["result"]["verification_items"][0]["resolved_evidence"][0]["id"] == first_transcript_id
+    assert asset["result"]["verification_items"][0]["display"]["kind"] == "verification_item"
+    assert asset["result"]["verification_items"][0]["display"]["tone"] == "positive"
+    assert asset["result"]["verification_items"][0]["display"]["priority"] == 361
+    assert asset["result"]["display_plan"]["version"] == 1
+    assert asset["result"]["display_plan"]["sections"][0]["id"] == "summary"
+    assert asset["result"]["display_plan"]["sections"][0]["default_view"] == "hero"
+    assert asset["result"]["display_plan"]["sections"][0]["item_ids"] == ["summary-primary"]
+    assert asset["result"]["display_plan"]["sections"][1]["id"] == "key_points"
+    assert asset["result"]["display_plan"]["sections"][1]["item_ids"] == ["kp-1"]
+    assert asset["result"]["display_plan"]["sections"][2]["id"] == "analysis_items"
+    assert asset["result"]["display_plan"]["sections"][2]["default_expanded"] is False
+    assert asset["result"]["display_plan"]["sections"][3]["id"] == "verification_items"
+    assert asset["result"]["display_plan"]["sections"][3]["default_view"] == "evidence_strip"
+    assert asset["result"]["synthesis"]["display"]["kind"] == "synthesis"
+    assert asset["result"]["synthesis"]["display"]["tone"] == "hero"
+    assert asset["result"]["synthesis"]["display"]["priority"] == 400
+    assert asset["result"]["synthesis"]["id"] == "synthesis-primary"
+    assert asset["result"]["display_plan"]["sections"][4]["id"] == "synthesis"
+    assert asset["result"]["display_plan"]["sections"][4]["default_view"] == "spotlight"
+    assert asset["result"]["display_plan"]["sections"][4]["item_ids"] == ["synthesis-primary"]
+    assert asset["result"]["warnings"] == []
+    assert asset["result"]["display_plan"]["sections"][5]["id"] == "warnings"
+    assert asset["result"]["display_plan"]["sections"][5]["item_count"] == 0
+    assert asset["result"]["display_plan"]["sections"][5]["default_expanded"] is False
+    assert first_transcript_id in asset["result"]["evidence_backlinks"]
+    assert asset["result"]["evidence_backlinks"][first_transcript_id][0]["kind"] == "key_point"
+    assert asset["result"]["evidence_backlinks"][first_transcript_id][1]["kind"] == "analysis_item"
+    assert asset["result"]["evidence_backlinks"][first_transcript_id][2]["kind"] == "verification_item"
+    assert asset["result"]["result_index"]["summary-primary"]["section"] == "summary"
+    assert asset["result"]["result_index"]["kp-1"]["section"] == "key_points"
+    assert asset["result"]["result_index"]["kp-1"]["evidence_segment_ids"] == [first_transcript_id]
+    assert asset["result"]["result_index"]["synthesis-primary"]["kind"] == "synthesis"
+    assert asset["evidence_index"]
+    assert first_transcript_id in asset["evidence_index"]
+    assert asset["evidence_index"][first_transcript_id]["kind"] == "transcript"
+    assert asset["evidence_index"][first_transcript_id]["preview_text"] == "hello transcript"
     assert asset["synthesis"] == "Synthesized answer"
     assert asset["metadata"]["llm_processing"]["status"] == "pass"
+    assert asset["metadata"]["llm_processing"]["provider"] == "openai"
+    assert asset["metadata"]["llm_processing"]["content_policy_id"] == "video_text_first_v1"
+    assert asset["metadata"]["llm_processing"]["supported_input_modalities"] == ["text", "text_image"]
+    assert asset["metadata"]["llm_processing"]["text_input_modality"] == "text_image"
+    assert asset["metadata"]["llm_processing"]["multimodal_input_modality"] == "text_image"
+    assert asset["metadata"]["llm_processing"]["task_intent"] == "summarize_video_from_subtitle_and_whisper_transcript"
+    assert asset["metadata"]["llm_processing"]["request_artifacts"]["text"] == "analysis/llm/text_request.json"
+    assert asset["metadata"]["llm_processing"]["request_artifacts"]["multimodal"] == "analysis/llm/multimodal_request.json"
+    assert asset["metadata"]["llm_processing"]["handshake"]["request_artifacts"]["text"] == "analysis/llm/text_request.json"
+    assert asset["metadata"]["llm_processing"]["handshake"]["analysis_model"] == "gpt-4.1-mini"
+    assert asset["metadata"]["llm_processing"]["handshake"]["schema_mode"] == "json_schema"
+    assert asset["metadata"]["llm_processing"]["handshake"]["content_policy_id"] == "video_text_first_v1"
+    assert asset["metadata"]["llm_processing"]["handshake"]["text_input_modality"] == "text_image"
+    assert asset["metadata"]["llm_processing"]["handshake"]["multimodal_input_modality"] == "text_image"
     assert asset["metadata"]["llm_processing"]["summary_available"] is True
+    assert asset["metadata"]["llm_processing"]["key_point_count"] == 1
+    assert asset["metadata"]["llm_processing"]["structured_result_available"] is True
     assert asset["metadata"]["media_processing"]["media_kind"] == "video"
     assert asset["metadata"]["media_processing"]["transcript_text_available"] is True
     assert asset["metadata"]["media_processing"]["multimodal_frame_paths"]
@@ -285,3 +423,41 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     assert (target_dir / "analysis" / "transcript" / "transcript.json").exists()
     assert (target_dir / "analysis" / "frames" / "frame-001.jpg").exists()
     assert (target_dir / "analysis" / "llm" / "analysis_result.json").exists()
+    assert (target_dir / "analysis" / "llm" / "text_request.json").exists()
+    assert (target_dir / "analysis" / "llm" / "multimodal_request.json").exists()
+    pipeline = json.loads((target_dir / "pipeline.json").read_text(encoding="utf-8"))
+    status = json.loads((target_dir / "status.json").read_text(encoding="utf-8"))
+    assert pipeline["llm_provider"] == "openai"
+    assert pipeline["llm_skip_reason"] is None
+    assert status["llm_provider"] == "openai"
+    assert status["llm_skip_reason"] is None
+
+
+def test_serialize_structured_result_includes_typed_warning_refs() -> None:
+    processor = JobProcessor()
+    payload = processor._serialize_structured_result(  # noqa: SLF001
+        StructuredResult(
+            warnings=[
+                WarningItem(
+                    code="invalid_evidence_reference",
+                    severity="warn",
+                    message="verification_item:ver-1 referenced unknown evidence id: missing-id",
+                    related_refs=[
+                        RelatedRef(kind="verification_item", id="ver-1", role="source_item"),
+                        RelatedRef(kind="evidence_segment", id="missing-id", role="missing_reference"),
+                    ],
+                )
+            ]
+        ),
+        evidence_segments=[],
+    )
+
+    assert payload is not None
+    assert payload["warnings"][0]["code"] == "invalid_evidence_reference"
+    assert payload["warnings"][0]["related_refs"][0]["kind"] == "verification_item"
+    assert payload["warnings"][0]["related_refs"][0]["id"] == "ver-1"
+    assert payload["warnings"][0]["related_refs"][1]["kind"] == "evidence_segment"
+    assert payload["warnings"][0]["related_refs"][1]["role"] == "missing_reference"
+    assert payload["evidence_backlinks"] == {}
+    assert payload["result_index"]["warning-1"]["section"] == "warnings"
+    assert payload["result_index"]["warning-1"]["evidence_segment_ids"] == ["missing-id"]

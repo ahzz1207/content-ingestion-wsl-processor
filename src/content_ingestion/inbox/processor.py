@@ -85,6 +85,7 @@ class JobProcessor:
         media_processing = process_media_asset(job_dir=target_dir, asset=asset, settings=self.settings)
         llm_analysis = analyze_asset(job_dir=target_dir, asset=asset, settings=self.settings)
         asset.summary = llm_analysis.summary or asset.summary
+        asset.structured_result = llm_analysis.structured_result
         asset.analysis_items = llm_analysis.analysis_items
         asset.verification_items = llm_analysis.verification_items
         asset.synthesis = llm_analysis.synthesis
@@ -109,13 +110,15 @@ class JobProcessor:
                 "transcript_text": asset.transcript_text,
                 "analysis_text": asset.analysis_text,
                 "summary": asset.summary,
+                "result": self._serialize_structured_result(asset.structured_result, asset.evidence_segments),
                 "analysis_items": asset.analysis_items,
-                "verification_items": asset.verification_items,
+                "verification_items": self._serialize_verification_items(asset.verification_items, asset.evidence_segments),
                 "synthesis": asset.synthesis,
                 "language": asset.language,
                 "blocks": [self._serialize_block(block) for block in asset.blocks],
                 "attachments": [self._serialize_attachment(attachment) for attachment in asset.attachments],
                 "evidence_segments": [self._serialize_evidence_segment(segment) for segment in asset.evidence_segments],
+                "evidence_index": self._build_evidence_index(asset.evidence_segments),
                 "metadata": self._build_asset_metadata(
                     asset,
                     metadata,
@@ -142,6 +145,8 @@ class JobProcessor:
             "capture_validation_status": capture_validation.get("status") if capture_validation else None,
             "media_processing_status": media_processing.status,
             "llm_processing_status": llm_analysis.status,
+            "llm_provider": llm_analysis.provider,
+            "llm_skip_reason": llm_analysis.skip_reason,
             "steps": [
                 {"name": "load_metadata", "status": "success"},
                 {"name": "load_capture_manifest", "status": "success" if capture_manifest else "skipped"},
@@ -170,6 +175,8 @@ class JobProcessor:
             "capture_validation_status": capture_validation.get("status") if capture_validation else None,
             "media_processing_status": media_processing.status,
             "llm_processing_status": llm_analysis.status,
+            "llm_provider": llm_analysis.provider,
+            "llm_skip_reason": llm_analysis.skip_reason,
             "started_at": started_at.isoformat(),
             "processed_at": processed_at.isoformat(),
         }
@@ -275,13 +282,39 @@ class JobProcessor:
         }
         normalized_metadata["llm_processing"] = {
             "status": llm_analysis.status,
+            "provider": llm_analysis.provider,
+            "base_url": llm_analysis.base_url,
             "analysis_model": llm_analysis.analysis_model,
             "multimodal_model": llm_analysis.multimodal_model,
+            "schema_mode": llm_analysis.schema_mode,
+            "content_policy_id": llm_analysis.content_policy_id,
+            "supported_input_modalities": llm_analysis.supported_input_modalities,
+            "text_input_modality": llm_analysis.text_input_modality,
+            "multimodal_input_modality": llm_analysis.multimodal_input_modality,
+            "task_intent": llm_analysis.task_intent,
+            "skip_reason": llm_analysis.skip_reason,
+            "request_artifacts": llm_analysis.request_artifacts,
             "summary_available": bool(llm_analysis.summary),
+            "key_point_count": len(llm_analysis.key_points),
             "analysis_item_count": len(llm_analysis.analysis_items),
             "verification_item_count": len(llm_analysis.verification_items),
+            "structured_result_available": llm_analysis.structured_result is not None,
             "output_path": llm_analysis.output_path,
             "warnings": llm_analysis.warnings,
+            "handshake": {
+                "provider": llm_analysis.provider,
+                "base_url": llm_analysis.base_url,
+                "analysis_model": llm_analysis.analysis_model,
+                "multimodal_model": llm_analysis.multimodal_model,
+                "schema_mode": llm_analysis.schema_mode,
+                "content_policy_id": llm_analysis.content_policy_id,
+                "supported_input_modalities": llm_analysis.supported_input_modalities,
+                "text_input_modality": llm_analysis.text_input_modality,
+                "multimodal_input_modality": llm_analysis.multimodal_input_modality,
+                "task_intent": llm_analysis.task_intent,
+                "skip_reason": llm_analysis.skip_reason,
+                "request_artifacts": llm_analysis.request_artifacts,
+            },
         }
         return normalized_metadata
 
@@ -349,6 +382,481 @@ class JobProcessor:
             "start_ms": segment.start_ms,
             "end_ms": segment.end_ms,
         }
+
+    def _serialize_structured_result(self, result, evidence_segments) -> dict[str, Any] | None:
+        if result is None:
+            return None
+        evidence_index = {segment.id: segment for segment in evidence_segments}
+        summary_payload = (
+            None
+            if result.summary is None
+            else {
+                "id": "summary-primary",
+                "headline": result.summary.headline,
+                "short_text": result.summary.short_text,
+                "display": self._build_display_payload(
+                    kind="summary",
+                    priority=0,
+                    compact_text=result.summary.short_text,
+                    label=result.summary.headline,
+                    tone="hero",
+                ),
+            }
+        )
+        key_points_payload = [
+            {
+                "id": item.id,
+                "title": item.title,
+                "details": item.details,
+                "evidence_segment_ids": item.evidence_segment_ids,
+                "resolved_evidence": self._resolve_evidence_refs(item.evidence_segment_ids, evidence_index),
+                "display": self._build_display_payload(
+                    kind="key_point",
+                    priority=100 + index,
+                    compact_text=f"{item.title}: {item.details}",
+                    label=item.title,
+                    tone="accent",
+                ),
+            }
+            for index, item in enumerate(result.key_points, start=1)
+        ]
+        analysis_items_payload = [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "statement": item.statement,
+                "evidence_segment_ids": item.evidence_segment_ids,
+                "resolved_evidence": self._resolve_evidence_refs(item.evidence_segment_ids, evidence_index),
+                "confidence": item.confidence,
+                "display": self._build_display_payload(
+                    kind="analysis_item",
+                    priority=200 + index,
+                    compact_text=item.statement,
+                    label=item.kind.replace("_", " "),
+                    tone="neutral",
+                ),
+            }
+            for index, item in enumerate(result.analysis_items, start=1)
+        ]
+        verification_items_payload = [
+            {
+                "id": item.id,
+                "claim": item.claim,
+                "status": item.status,
+                "evidence_segment_ids": item.evidence_segment_ids,
+                "resolved_evidence": self._resolve_evidence_refs(item.evidence_segment_ids, evidence_index),
+                "rationale": item.rationale,
+                "confidence": item.confidence,
+                "display": self._build_display_payload(
+                    kind="verification_item",
+                    priority=self._verification_priority(item.status, index),
+                    compact_text=f"{item.claim} [{item.status}]",
+                    label=item.status,
+                    tone=self._verification_tone(item.status),
+                ),
+            }
+            for index, item in enumerate(result.verification_items, start=1)
+        ]
+        synthesis_payload = (
+            None
+            if result.synthesis is None
+            else {
+                "id": "synthesis-primary",
+                "final_answer": result.synthesis.final_answer,
+                "next_steps": result.synthesis.next_steps,
+                "open_questions": result.synthesis.open_questions,
+                "display": self._build_display_payload(
+                    kind="synthesis",
+                    priority=400,
+                    compact_text=result.synthesis.final_answer,
+                    label="Final answer",
+                    tone="hero",
+                ),
+            }
+        )
+        warnings_payload = [
+            {
+                "id": f"warning-{index}",
+                "code": item.code,
+                "severity": item.severity,
+                "message": item.message,
+                "related_refs": [
+                    {
+                        "kind": ref.kind,
+                        "id": ref.id,
+                        "role": ref.role,
+                    }
+                    for ref in item.related_refs
+                ],
+                "display": self._build_display_payload(
+                    kind="warning",
+                    priority=self._warning_priority(item.severity, index),
+                    compact_text=item.message,
+                    label=item.severity,
+                    tone=self._warning_tone(item.severity),
+                ),
+            }
+            for index, item in enumerate(result.warnings, start=1)
+        ]
+        evidence_backlinks = self._build_evidence_backlinks(
+            key_points=key_points_payload,
+            analysis_items=analysis_items_payload,
+            verification_items=verification_items_payload,
+        )
+        result_index = self._build_result_index(
+            summary_payload=summary_payload,
+            key_points=key_points_payload,
+            analysis_items=analysis_items_payload,
+            verification_items=verification_items_payload,
+            synthesis_payload=synthesis_payload,
+            warnings=warnings_payload,
+        )
+        return {
+            "summary": summary_payload,
+            "key_points": key_points_payload,
+            "analysis_items": analysis_items_payload,
+            "verification_items": verification_items_payload,
+            "synthesis": synthesis_payload,
+            "warnings": warnings_payload,
+            "evidence_backlinks": evidence_backlinks,
+            "result_index": result_index,
+            "display_plan": self._build_display_plan(
+                summary_payload=summary_payload,
+                key_points=key_points_payload,
+                analysis_items=analysis_items_payload,
+                verification_items=verification_items_payload,
+                synthesis_payload=synthesis_payload,
+                warnings=warnings_payload,
+            ),
+        }
+
+    def _build_evidence_index(self, segments) -> dict[str, Any]:
+        return {
+            segment.id: {
+                "kind": segment.kind,
+                "source": segment.source,
+                "start_ms": segment.start_ms,
+                "end_ms": segment.end_ms,
+                "preview_text": segment.text[:280],
+            }
+            for segment in segments
+        }
+
+    def _build_evidence_backlinks(
+        self,
+        *,
+        key_points: list[dict[str, Any]],
+        analysis_items: list[dict[str, Any]],
+        verification_items: list[dict[str, Any]],
+    ) -> dict[str, list[dict[str, Any]]]:
+        backlinks: dict[str, list[dict[str, Any]]] = {}
+        for item in key_points:
+            self._append_evidence_backlink(
+                backlinks,
+                item=item,
+                item_kind="key_point",
+                label=item.get("title", ""),
+            )
+        for item in analysis_items:
+            self._append_evidence_backlink(
+                backlinks,
+                item=item,
+                item_kind="analysis_item",
+                label=item.get("statement", ""),
+            )
+        for item in verification_items:
+            self._append_evidence_backlink(
+                backlinks,
+                item=item,
+                item_kind="verification_item",
+                label=item.get("claim", ""),
+            )
+        return backlinks
+
+    def _append_evidence_backlink(
+        self,
+        backlinks: dict[str, list[dict[str, Any]]],
+        *,
+        item: dict[str, Any],
+        item_kind: str,
+        label: str,
+    ) -> None:
+        evidence_ids = item.get("evidence_segment_ids") or []
+        display = item.get("display") or {}
+        for evidence_id in evidence_ids:
+            backlinks.setdefault(evidence_id, []).append(
+                {
+                    "kind": item_kind,
+                    "id": item["id"],
+                    "label": str(label).strip(),
+                    "priority": display.get("priority"),
+                }
+            )
+
+    def _build_result_index(
+        self,
+        *,
+        summary_payload: dict[str, Any] | None,
+        key_points: list[dict[str, Any]],
+        analysis_items: list[dict[str, Any]],
+        verification_items: list[dict[str, Any]],
+        synthesis_payload: dict[str, Any] | None,
+        warnings: list[dict[str, Any]],
+    ) -> dict[str, dict[str, Any]]:
+        index: dict[str, dict[str, Any]] = {}
+        if summary_payload is not None:
+            index[summary_payload["id"]] = self._build_result_index_entry(
+                item=summary_payload,
+                section="summary",
+                kind="summary",
+                label=summary_payload.get("headline", ""),
+                evidence_segment_ids=[],
+            )
+        for item in key_points:
+            index[item["id"]] = self._build_result_index_entry(
+                item=item,
+                section="key_points",
+                kind="key_point",
+                label=item.get("title", ""),
+                evidence_segment_ids=item.get("evidence_segment_ids", []),
+            )
+        for item in analysis_items:
+            index[item["id"]] = self._build_result_index_entry(
+                item=item,
+                section="analysis_items",
+                kind="analysis_item",
+                label=item.get("statement", ""),
+                evidence_segment_ids=item.get("evidence_segment_ids", []),
+            )
+        for item in verification_items:
+            index[item["id"]] = self._build_result_index_entry(
+                item=item,
+                section="verification_items",
+                kind="verification_item",
+                label=item.get("claim", ""),
+                evidence_segment_ids=item.get("evidence_segment_ids", []),
+            )
+        if synthesis_payload is not None:
+            index[synthesis_payload["id"]] = self._build_result_index_entry(
+                item=synthesis_payload,
+                section="synthesis",
+                kind="synthesis",
+                label=synthesis_payload.get("final_answer", ""),
+                evidence_segment_ids=[],
+            )
+        for item in warnings:
+            index[item["id"]] = self._build_result_index_entry(
+                item=item,
+                section="warnings",
+                kind="warning",
+                label=item.get("message", ""),
+                evidence_segment_ids=[
+                    ref["id"]
+                    for ref in item.get("related_refs", [])
+                    if ref.get("kind") == "evidence_segment"
+                ],
+            )
+        return index
+
+    def _build_result_index_entry(
+        self,
+        *,
+        item: dict[str, Any],
+        section: str,
+        kind: str,
+        label: str,
+        evidence_segment_ids: list[str],
+    ) -> dict[str, Any]:
+        display = item.get("display") or {}
+        return {
+            "section": section,
+            "kind": kind,
+            "label": str(label).strip(),
+            "priority": display.get("priority"),
+            "tone": display.get("tone"),
+            "evidence_segment_ids": evidence_segment_ids,
+        }
+
+    def _serialize_verification_items(self, items, evidence_segments) -> list[dict[str, Any]]:
+        evidence_index = {segment.id: segment for segment in evidence_segments}
+        serialized: list[dict[str, Any]] = []
+        for item in items:
+            payload = dict(item)
+            evidence_ids = payload.get("evidence_segment_ids")
+            if isinstance(evidence_ids, list):
+                payload["resolved_evidence"] = self._resolve_evidence_refs(evidence_ids, evidence_index)
+            else:
+                payload["resolved_evidence"] = []
+            serialized.append(payload)
+        return serialized
+
+    def _resolve_evidence_refs(self, evidence_ids, evidence_index) -> list[dict[str, Any]]:
+        resolved: list[dict[str, Any]] = []
+        for evidence_id in evidence_ids:
+            segment = evidence_index.get(evidence_id)
+            if segment is None:
+                continue
+            resolved.append(
+                {
+                    "id": segment.id,
+                    "kind": segment.kind,
+                    "source": segment.source,
+                    "start_ms": segment.start_ms,
+                    "end_ms": segment.end_ms,
+                    "preview_text": segment.text[:280],
+                }
+            )
+        return resolved
+
+    def _build_display_payload(
+        self,
+        *,
+        kind: str,
+        priority: int,
+        compact_text: str,
+        label: str,
+        tone: str,
+    ) -> dict[str, Any]:
+        normalized = " ".join(compact_text.split())
+        return {
+            "kind": kind,
+            "priority": priority,
+            "label": label.strip(),
+            "tone": tone,
+            "compact_text": normalized[:160],
+        }
+
+    def _build_display_plan(
+        self,
+        *,
+        summary_payload: dict[str, Any] | None,
+        key_points: list[dict[str, Any]],
+        analysis_items: list[dict[str, Any]],
+        verification_items: list[dict[str, Any]],
+        synthesis_payload: dict[str, Any] | None,
+        warnings: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "sections": [
+                self._build_section_plan(
+                    section_id="summary",
+                    title="Summary",
+                    priority=0,
+                    default_view="hero",
+                    default_expanded=True,
+                    item_count=1 if summary_payload else 0,
+                    item_ids=[] if summary_payload is None else [summary_payload["id"]],
+                ),
+                self._build_section_plan(
+                    section_id="key_points",
+                    title="Key Points",
+                    priority=100,
+                    default_view="cards",
+                    default_expanded=True,
+                    item_count=len(key_points),
+                    item_ids=[item["id"] for item in key_points],
+                ),
+                self._build_section_plan(
+                    section_id="analysis_items",
+                    title="Analysis",
+                    priority=200,
+                    default_view="stack",
+                    default_expanded=False,
+                    item_count=len(analysis_items),
+                    item_ids=[item["id"] for item in analysis_items],
+                ),
+                self._build_section_plan(
+                    section_id="verification_items",
+                    title="Verification",
+                    priority=300,
+                    default_view="evidence_strip",
+                    default_expanded=False,
+                    item_count=len(verification_items),
+                    item_ids=[item["id"] for item in verification_items],
+                    pinned_item_ids=[
+                        item["id"]
+                        for item in verification_items
+                        if item.get("status") in {"unsupported", "partial"}
+                    ],
+                ),
+                self._build_section_plan(
+                    section_id="synthesis",
+                    title="Takeaway",
+                    priority=400,
+                    default_view="spotlight",
+                    default_expanded=True,
+                    item_count=1 if synthesis_payload else 0,
+                    item_ids=[] if synthesis_payload is None else [synthesis_payload["id"]],
+                ),
+                self._build_section_plan(
+                    section_id="warnings",
+                    title="Warnings",
+                    priority=500,
+                    default_view="compact_list",
+                    default_expanded=bool(warnings),
+                    item_count=len(warnings),
+                    item_ids=[item["id"] for item in warnings],
+                ),
+            ],
+        }
+
+    def _build_section_plan(
+        self,
+        *,
+        section_id: str,
+        title: str,
+        priority: int,
+        default_view: str,
+        default_expanded: bool,
+        item_count: int,
+        item_ids: list[str],
+        pinned_item_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        payload = {
+            "id": section_id,
+            "title": title,
+            "priority": priority,
+            "default_view": default_view,
+            "default_expanded": default_expanded,
+            "item_count": item_count,
+            "item_ids": item_ids,
+        }
+        if pinned_item_ids:
+            payload["pinned_item_ids"] = pinned_item_ids
+        return payload
+
+    def _verification_priority(self, status: str, index: int) -> int:
+        base = {
+            "unsupported": 300,
+            "partial": 320,
+            "unclear": 340,
+            "supported": 360,
+        }.get(status, 380)
+        return base + index
+
+    def _verification_tone(self, status: str) -> str:
+        return {
+            "unsupported": "alert",
+            "partial": "caution",
+            "unclear": "muted",
+            "supported": "positive",
+        }.get(status, "neutral")
+
+    def _warning_priority(self, severity: str, index: int) -> int:
+        base = {
+            "error": 500,
+            "warn": 520,
+            "info": 540,
+        }.get(severity, 560)
+        return base + index
+
+    def _warning_tone(self, severity: str) -> str:
+        return {
+            "error": "alert",
+            "warn": "caution",
+            "info": "muted",
+        }.get(severity, "neutral")
 
     def _error_code(self, exc: Exception) -> str:
         if isinstance(exc, JobProtocolError):

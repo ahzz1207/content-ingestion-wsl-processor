@@ -25,12 +25,15 @@ Direct platform login/fetch inside the WSL repository should be treated as exper
 ## Documents
 
 - Project status: `docs/project-status.md`
+- Round 2 LLM handoff: `docs/round2-llm-handoff-2026-03-16.md`
 - Cross-repo collaboration: `docs/cross-repo-collaboration.md`
 - Architecture: `docs/architecture.md`
 - Inbox protocol: `docs/inbox-protocol.md`
 - Windows job export: `docs/windows-job-export.md`
 - WSL MVP plan: `docs/wsl-mvp-plan.md`
 - WSL E2E guide: `docs/wsl-e2e-guide.md`
+- Round 2 WSL processing plan: `docs/round2-wsl-processing-plan-2026-03-15.md`
+- LLM interaction contract: `docs/llm-interaction-contract-2026-03-16.md`
 - Review fixes: `docs/review-fixes-2026-03-12.md`
 
 ## Shared inbox configuration
@@ -40,6 +43,31 @@ Both repos should now prefer the same environment variable:
 - `CONTENT_INGESTION_SHARED_INBOX_ROOT`
 
 Explicit CLI paths still override the environment variable.
+
+## LLM provider configuration
+
+The WSL processor currently uses an OpenAI-compatible `responses` client.
+
+Default OpenAI-style environment variables still work:
+
+- `OPENAI_API_KEY`
+- `OPENAI_BASE_URL`
+- `CONTENT_INGESTION_ANALYSIS_MODEL`
+- `CONTENT_INGESTION_MULTIMODAL_MODEL`
+
+ZenMux can be configured with provider-specific aliases:
+
+- `ZENMUX_API_KEY`
+- `ZENMUX_BASE_URL`
+- `ZENMUX_ANALYSIS_MODEL`
+- `ZENMUX_MULTIMODAL_MODEL`
+
+If `ZENMUX_*` variables are present, the processor treats the LLM provider as `zenmux`.
+If `ZENMUX_BASE_URL` is not set, it defaults to `https://zenmux.ai/api/v1`.
+
+For a low-cost live provider check, run:
+
+- `python main.py llm-smoke --text "smoke test"`
 
 ## Current repository status
 

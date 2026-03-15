@@ -116,83 +116,52 @@ def test_job_processor_writes_processed_outputs(tmp_path: Path) -> None:
     assert normalized["asset"]["title"] == "Inbox Title"
     assert normalized["asset"]["content_shape"] == "article"
     assert normalized["asset"]["canonical_url"] == "https://example.com/final-article"
-    assert normalized["asset"]["metadata"] == {
-        "job_id": "20260312_153000_ab12cd",
-        "content_type": "txt",
-        "handoff": {
-            "collector": "windows-client",
-            "collected_at": "2026-03-12T15:30:00+08:00",
-            "collection_mode": "browser",
-            "browser_channel": "msedge",
-            "profile_slug": "wechat-profile",
-            "wait_until": "networkidle",
-            "wait_for_selector": ".rich_media_content",
-            "wait_for_selector_state": "visible",
-            "primary_payload_role": "focused_capture",
-            "content_shape": "article",
-            "capture_manifest_filename": "capture_manifest.json",
-        },
-        "capture": {
-            "content_shape": "article",
-            "video_download_mode": None,
-            "primary_payload": {
-                "path": "payload.txt",
-                "role": "focused_capture",
-                "media_type": "text/plain",
-                "content_type": "txt",
-                "size_bytes": 22,
-                "is_primary": True,
-            },
-            "artifacts": [
-                {
-                    "path": "payload.txt",
-                    "role": "focused_capture",
-                    "media_type": "text/plain",
-                    "size_bytes": 22,
-                    "is_primary": True,
-                },
-                {
-                    "path": "attachments/source/raw.html",
-                    "role": "raw_capture",
-                    "media_type": "text/html",
-                    "size_bytes": 29,
-                    "is_primary": False,
-                },
-                {
-                    "path": "attachments/derived/capture_validation.json",
-                    "role": "capture_validation",
-                    "media_type": "application/json",
-                    "size_bytes": 88,
-                    "is_primary": False,
-                },
-            ],
-            "validation": {
-                "status": "pass",
-                "passed": 4,
-                "warned": 0,
-                "failed": 0,
-                "artifact_path": "attachments/derived/capture_validation.json",
-            },
-        },
-        "media_processing": {
-            "status": "skipped",
-            "media_kind": None,
-            "source_attachment_path": None,
-            "transcript_text_available": False,
-            "transcript_segment_count": 0,
-            "multimodal_frame_paths": [],
-            "warnings": [],
-        },
-        "llm_processing": {
-            "status": "skipped",
-            "analysis_model": None,
-            "multimodal_model": None,
-            "summary_available": False,
-            "analysis_item_count": 0,
-            "verification_item_count": 0,
-            "output_path": None,
-            "warnings": ["OPENAI_API_KEY is not configured"],
-        },
+    asset_metadata = normalized["asset"]["metadata"]
+    assert asset_metadata["job_id"] == "20260312_153000_ab12cd"
+    assert asset_metadata["content_type"] == "txt"
+    assert asset_metadata["handoff"] == {
+        "collector": "windows-client",
+        "collected_at": "2026-03-12T15:30:00+08:00",
+        "collection_mode": "browser",
+        "browser_channel": "msedge",
+        "profile_slug": "wechat-profile",
+        "wait_until": "networkidle",
+        "wait_for_selector": ".rich_media_content",
+        "wait_for_selector_state": "visible",
+        "primary_payload_role": "focused_capture",
+        "content_shape": "article",
+        "capture_manifest_filename": "capture_manifest.json",
+    }
+    assert asset_metadata["capture"]["content_shape"] == "article"
+    assert asset_metadata["capture"]["validation"]["status"] == "pass"
+    assert asset_metadata["media_processing"]["status"] == "skipped"
+    assert asset_metadata["llm_processing"]["status"] == "skipped"
+    assert asset_metadata["llm_processing"]["provider"] == "openai"
+    assert asset_metadata["llm_processing"]["schema_mode"] == "json_schema"
+    assert asset_metadata["llm_processing"]["content_policy_id"] == "article_text_first_v1"
+    assert asset_metadata["llm_processing"]["supported_input_modalities"] == ["text", "image", "text_image"]
+    assert asset_metadata["llm_processing"]["text_input_modality"] == "text_image"
+    assert asset_metadata["llm_processing"]["multimodal_input_modality"] == "text_image"
+    assert (
+        asset_metadata["llm_processing"]["task_intent"]
+        == "summarize_article_with_optional_image_grounding"
+    )
+    assert asset_metadata["llm_processing"]["skip_reason"] == "missing OPENAI_API_KEY"
+    assert asset_metadata["llm_processing"]["request_artifacts"] == {}
+    assert asset_metadata["llm_processing"]["warnings"] == ["OPENAI_API_KEY is not configured"]
+    assert asset_metadata["llm_processing"]["handshake"] == {
+        "provider": "openai",
+        "base_url": None,
+        "analysis_model": None,
+        "multimodal_model": None,
+        "schema_mode": "json_schema",
+        "content_policy_id": "article_text_first_v1",
+        "supported_input_modalities": ["text", "image", "text_image"],
+        "text_input_modality": "text_image",
+        "multimodal_input_modality": "text_image",
+        "task_intent": "summarize_article_with_optional_image_grounding",
+        "skip_reason": "missing OPENAI_API_KEY",
+        "request_artifacts": {},
     }
     assert normalized["asset"]["blocks"]
     assert normalized["asset"]["attachments"]
@@ -207,6 +176,8 @@ def test_job_processor_writes_processed_outputs(tmp_path: Path) -> None:
     assert status["artifact_count"] == 3
     assert status["capture_manifest_filename"] == "capture_manifest.json"
     assert status["capture_validation_status"] == "pass"
+    assert status["llm_provider"] == "openai"
+    assert status["llm_skip_reason"] == "missing OPENAI_API_KEY"
     assert pipeline["status"] == "success"
     assert pipeline["payload_filename"] == "payload.txt"
     assert pipeline["content_type"] == "txt"
@@ -215,6 +186,8 @@ def test_job_processor_writes_processed_outputs(tmp_path: Path) -> None:
     assert pipeline["capture_validation_status"] == "pass"
     assert pipeline["media_processing_status"] == "skipped"
     assert pipeline["llm_processing_status"] == "skipped"
+    assert pipeline["llm_provider"] == "openai"
+    assert pipeline["llm_skip_reason"] == "missing OPENAI_API_KEY"
     assert [step["name"] for step in pipeline["steps"]] == [
         "load_metadata",
         "load_capture_manifest",

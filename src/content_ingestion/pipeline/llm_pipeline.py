@@ -5,51 +5,128 @@ import importlib.util
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from content_ingestion.core.config import Settings
-from content_ingestion.core.models import ContentAsset
+from content_ingestion.core.models import (
+    AnalysisItem,
+    ContentAsset,
+    KeyPoint,
+    RelatedRef,
+    ResultSummary,
+    StructuredResult,
+    SynthesisResult,
+    VerificationItem,
+    WarningItem,
+)
+from content_ingestion.pipeline.llm_contract import (
+    build_multimodal_verification_envelope,
+    build_text_analysis_envelope,
+)
 
 
 TEXT_ANALYSIS_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "summary": {"type": "string"},
-        "analysis_items": {"type": "array", "items": {"type": "string"}},
+        "summary": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "headline": {"type": "string"},
+                "short_text": {"type": "string"},
+            },
+            "required": ["headline", "short_text"],
+        },
+        "key_points": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "details": {"type": "string"},
+                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id", "title", "details", "evidence_segment_ids"],
+            },
+        },
+        "analysis_items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "statement": {"type": "string"},
+                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": ["number", "null"]},
+                },
+                "required": ["id", "kind", "statement", "evidence_segment_ids", "confidence"],
+            },
+        },
         "verification_items": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "id": {"type": "string"},
                     "claim": {"type": "string"},
-                    "status": {"type": "string", "enum": ["supported", "mixed", "uncertain"]},
-                    "evidence": {"type": "array", "items": {"type": "string"}},
+                    "status": {"type": "string", "enum": ["supported", "partial", "unsupported", "unclear"]},
+                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+                    "rationale": {"type": ["string", "null"]},
+                    "confidence": {"type": ["number", "null"]},
                 },
-                "required": ["claim", "status", "evidence"],
+                "required": ["id", "claim", "status", "evidence_segment_ids", "rationale", "confidence"],
             },
         },
-        "synthesis": {"type": "string"},
+        "synthesis": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "final_answer": {"type": "string"},
+                "next_steps": {"type": "array", "items": {"type": "string"}},
+                "open_questions": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["final_answer", "next_steps", "open_questions"],
+        },
     },
-    "required": ["summary", "analysis_items", "verification_items", "synthesis"],
+    "required": ["summary", "key_points", "analysis_items", "verification_items", "synthesis"],
 }
 
 MULTIMODAL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "visual_findings": {"type": "array", "items": {"type": "string"}},
+        "visual_findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "finding": {"type": "string"},
+                    "evidence_frame_paths": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["id", "finding", "evidence_frame_paths"],
+            },
+        },
         "verification_adjustments": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "id": {"type": "string"},
                     "claim": {"type": "string"},
-                    "status": {"type": "string", "enum": ["supported", "mixed", "uncertain"]},
+                    "status": {"type": "string", "enum": ["supported", "partial", "unsupported", "unclear"]},
                     "rationale": {"type": "string"},
+                    "evidence_frame_paths": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["claim", "status", "rationale"],
+                "required": ["id", "claim", "status", "rationale", "evidence_frame_paths"],
             },
         },
         "overall_assessment": {"type": "string"},
@@ -61,27 +138,65 @@ MULTIMODAL_SCHEMA = {
 @dataclass(slots=True)
 class LlmAnalysisResult:
     status: str
+    provider: str | None = None
+    base_url: str | None = None
+    schema_mode: str | None = None
+    content_policy_id: str | None = None
+    supported_input_modalities: list[str] = field(default_factory=list)
+    text_input_modality: str | None = None
+    multimodal_input_modality: str | None = None
+    task_intent: str | None = None
+    skip_reason: str | None = None
     summary: str | None = None
+    key_points: list[KeyPoint] = field(default_factory=list)
     analysis_items: list[str] = field(default_factory=list)
     verification_items: list[dict[str, object]] = field(default_factory=list)
     synthesis: str | None = None
+    structured_result: StructuredResult | None = None
     analysis_model: str | None = None
     multimodal_model: str | None = None
     steps: list[dict[str, object]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     output_path: str | None = None
+    request_artifacts: dict[str, str] = field(default_factory=dict)
 
 
 def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> LlmAnalysisResult:
+    text_envelope = build_text_analysis_envelope(
+        asset=asset,
+        job_dir=job_dir,
+        settings=settings,
+        model=settings.analysis_model,
+        output_schema_name="content_analysis",
+    )
     if not settings.openai_api_key:
+        missing_key_name = "ZENMUX_API_KEY" if settings.llm_provider == "zenmux" else "OPENAI_API_KEY"
         return LlmAnalysisResult(
             status="skipped",
-            warnings=["OPENAI_API_KEY is not configured"],
-            steps=[{"name": "resolve_openai_api_key", "status": "skipped", "details": "missing OPENAI_API_KEY"}],
+            provider=settings.llm_provider,
+            base_url=settings.openai_base_url,
+            schema_mode="json_schema",
+            content_policy_id=text_envelope.content_policy.policy_id,
+            supported_input_modalities=list(text_envelope.content_policy.supported_input_modalities),
+            text_input_modality=text_envelope.task.input_modality,
+            multimodal_input_modality=text_envelope.content_policy.multimodal_input_modality,
+            task_intent=text_envelope.task_intent,
+            skip_reason=f"missing {missing_key_name}",
+            warnings=[f"{missing_key_name} is not configured"],
+            steps=[{"name": "resolve_openai_api_key", "status": "skipped", "details": f"missing {missing_key_name}"}],
         )
     if not openai_sdk_available():
         return LlmAnalysisResult(
             status="skipped",
+            provider=settings.llm_provider,
+            base_url=settings.openai_base_url,
+            schema_mode="json_schema",
+            content_policy_id=text_envelope.content_policy.policy_id,
+            supported_input_modalities=list(text_envelope.content_policy.supported_input_modalities),
+            text_input_modality=text_envelope.task.input_modality,
+            multimodal_input_modality=text_envelope.content_policy.multimodal_input_modality,
+            task_intent=text_envelope.task_intent,
+            skip_reason="missing openai package",
             warnings=["openai SDK is not installed"],
             steps=[{"name": "load_openai_sdk", "status": "skipped", "details": "missing openai package"}],
         )
@@ -91,6 +206,9 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
     analysis_dir.mkdir(parents=True, exist_ok=True)
     result = LlmAnalysisResult(
         status="pass",
+        provider=settings.llm_provider,
+        base_url=settings.openai_base_url,
+        schema_mode="json_schema",
         analysis_model=settings.analysis_model,
         multimodal_model=settings.multimodal_model,
         steps=[
@@ -99,46 +217,132 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
         ],
     )
 
+    result.content_policy_id = text_envelope.content_policy.policy_id
+    result.supported_input_modalities = list(text_envelope.content_policy.supported_input_modalities)
+    result.text_input_modality = text_envelope.task.input_modality
+    result.multimodal_input_modality = text_envelope.content_policy.multimodal_input_modality
+    result.task_intent = text_envelope.task_intent
+    text_request_path = analysis_dir / "text_request.json"
+    text_request_path.write_text(
+        json.dumps(text_envelope.to_serializable_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    result.request_artifacts["text"] = text_request_path.relative_to(job_dir).as_posix()
     text_payload = _call_structured_response(
         client=client,
         model=settings.analysis_model,
         instructions=_analysis_instructions(),
-        input_payload=_build_text_input(asset, settings=settings),
+        input_payload=text_envelope.to_model_input(),
         schema_name="content_analysis",
         schema=TEXT_ANALYSIS_SCHEMA,
     )
     result.steps.append({"name": "llm_text_analysis", "status": "success", "details": settings.analysis_model})
-    result.summary = str(text_payload["summary"]).strip()
-    result.analysis_items = [str(item).strip() for item in text_payload["analysis_items"] if str(item).strip()]
-    result.verification_items = list(text_payload["verification_items"])
-    result.synthesis = str(text_payload["synthesis"]).strip()
+    structured_result = _build_structured_result(text_payload)
+    valid_evidence_segment_ids = {segment.id for segment in asset.evidence_segments}
+    validation_warnings = _validate_structured_result_evidence(
+        structured_result,
+        valid_evidence_segment_ids=valid_evidence_segment_ids,
+    )
+    if validation_warnings:
+        repaired_payload = _repair_structured_result_payload(
+            client=client,
+            model=settings.analysis_model,
+            original_payload=text_payload,
+            valid_evidence_segment_ids=valid_evidence_segment_ids,
+            validation_warnings=[item.message for item in validation_warnings],
+        )
+        if repaired_payload is not None:
+            repaired_result = _build_structured_result(repaired_payload)
+            repaired_warnings = _validate_structured_result_evidence(
+                repaired_result,
+                valid_evidence_segment_ids=valid_evidence_segment_ids,
+            )
+            result.steps.append({"name": "repair_evidence_references", "status": "success", "details": settings.analysis_model})
+            structured_result = repaired_result
+            validation_warnings = repaired_warnings
+        else:
+            result.steps.append({"name": "repair_evidence_references", "status": "skipped", "details": "repair unavailable"})
+    if validation_warnings:
+        result.warnings.extend(item.message for item in validation_warnings)
+        result.steps.append(
+            {
+                "name": "validate_evidence_references",
+                "status": "warn",
+                "details": f"{len(validation_warnings)} evidence reference issue(s)",
+            }
+        )
+    else:
+        result.steps.append({"name": "validate_evidence_references", "status": "success", "details": "all references valid"})
+    result.structured_result = structured_result
+    if structured_result.summary is not None:
+        result.summary = structured_result.summary.short_text.strip()
+    result.key_points = structured_result.key_points
+    result.analysis_items = [item.statement for item in structured_result.analysis_items if item.statement.strip()]
+    result.verification_items = [_serialize_verification_item(item) for item in structured_result.verification_items]
+    if structured_result.synthesis is not None:
+        result.synthesis = structured_result.synthesis.final_answer.strip()
 
     frame_paths = _collect_frame_paths(job_dir, asset)
     if frame_paths:
+        multimodal_envelope = build_multimodal_verification_envelope(
+            asset=asset,
+            settings=settings,
+            model=settings.multimodal_model,
+            output_schema_name="content_multimodal_verification",
+            frame_paths=frame_paths,
+        )
+        result.multimodal_input_modality = multimodal_envelope.task.input_modality
+        multimodal_request_path = analysis_dir / "multimodal_request.json"
+        multimodal_request_path.write_text(
+            json.dumps(multimodal_envelope.to_serializable_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        result.request_artifacts["multimodal"] = multimodal_request_path.relative_to(job_dir).as_posix()
         multimodal_payload = _call_structured_response(
             client=client,
             model=settings.multimodal_model,
             instructions=_multimodal_instructions(),
-            input_payload=_build_multimodal_input(asset, frame_paths=frame_paths),
+            input_payload=multimodal_envelope.to_model_input(),
             schema_name="content_multimodal_verification",
             schema=MULTIMODAL_SCHEMA,
         )
         result.steps.append(
             {"name": "llm_multimodal_verification", "status": "success", "details": settings.multimodal_model}
         )
+        if result.structured_result is None:
+            result.structured_result = StructuredResult()
         result.analysis_items.extend(
-            [str(item).strip() for item in multimodal_payload["visual_findings"] if str(item).strip()]
+            [str(item["finding"]).strip() for item in multimodal_payload["visual_findings"] if str(item["finding"]).strip()]
         )
-        result.verification_items.extend(
-            [
-                {
-                    "claim": item["claim"],
-                    "status": item["status"],
-                    "evidence": [item["rationale"]],
-                }
-                for item in multimodal_payload["verification_adjustments"]
-            ]
-        )
+        for item in multimodal_payload["visual_findings"]:
+            result.structured_result.analysis_items.append(
+                AnalysisItem(
+                    id=str(item["id"]).strip(),
+                    kind="visual_finding",
+                    statement=str(item["finding"]).strip(),
+                    evidence_segment_ids=[],
+                    confidence=None,
+                )
+            )
+        for item in multimodal_payload["verification_adjustments"]:
+            verification_item = VerificationItem(
+                id=str(item["id"]).strip(),
+                claim=str(item["claim"]).strip(),
+                status=str(item["status"]).strip(),
+                evidence_segment_ids=[],
+                rationale=str(item["rationale"]).strip(),
+                confidence=None,
+            )
+            result.structured_result.verification_items.append(verification_item)
+            serialized = _serialize_verification_item(verification_item)
+            serialized["evidence_frame_paths"] = [str(path) for path in item["evidence_frame_paths"]]
+            result.verification_items.append(serialized)
+        if result.structured_result.synthesis is None:
+            result.structured_result.synthesis = SynthesisResult(
+                final_answer=str(multimodal_payload["overall_assessment"]).strip(),
+                next_steps=[],
+                open_questions=[],
+            )
         if not result.synthesis:
             result.synthesis = str(multimodal_payload["overall_assessment"]).strip()
 
@@ -147,10 +351,22 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
         json.dumps(
             {
                 "status": result.status,
+                "provider": result.provider,
+                "base_url": result.base_url,
+                "schema_mode": result.schema_mode,
+                "content_policy_id": result.content_policy_id,
+                "supported_input_modalities": result.supported_input_modalities,
+                "text_input_modality": result.text_input_modality,
+                "multimodal_input_modality": result.multimodal_input_modality,
+                "task_intent": result.task_intent,
+                "skip_reason": result.skip_reason,
+                "request_artifacts": result.request_artifacts,
                 "summary": result.summary,
+                "key_points": [_serialize_key_point(item) for item in result.key_points],
                 "analysis_items": result.analysis_items,
                 "verification_items": result.verification_items,
                 "synthesis": result.synthesis,
+                "result": _serialize_structured_result(result.structured_result),
                 "analysis_model": result.analysis_model,
                 "multimodal_model": result.multimodal_model,
                 "warnings": result.warnings,
@@ -194,43 +410,32 @@ def _call_structured_response(*, client, model: str, instructions: str, input_pa
     return json.loads(response.output_text)
 
 
-def _build_text_input(asset: ContentAsset, *, settings: Settings) -> str:
-    evidence_lines: list[str] = []
-    for segment in asset.evidence_segments[: settings.llm_max_evidence_segments]:
-        evidence_lines.append(f"- [{segment.kind}] {segment.text}")
-    blocks = "\n".join(f"- [{block.kind}] {block.text}" for block in asset.blocks[:20])
-    parts = [
-        f"Platform: {asset.source_platform}",
-        f"Source URL: {asset.source_url}",
-        f"Title: {asset.title}",
-        f"Author: {asset.author or 'unknown'}",
-        f"Published At: {asset.published_at.isoformat() if asset.published_at else 'unknown'}",
-        "",
-        "Captured content:",
-        asset.content_text or "",
-    ]
-    if asset.transcript_text:
-        parts.extend(["", "Transcript:", asset.transcript_text])
-    if blocks:
-        parts.extend(["", "Blocks:", blocks])
-    if evidence_lines:
-        parts.extend(["", "Evidence segments:", "\n".join(evidence_lines)])
-    return "\n".join(parts).strip()
-
-
-def _build_multimodal_input(asset: ContentAsset, *, frame_paths: list[Path]):
-    content = [
-        {
-            "type": "input_text",
-            "text": (
-                "Review these extracted video frames together with the transcript context. "
-                f"Title: {asset.title}\nSummary: {asset.summary or ''}\nTranscript: {asset.transcript_text or ''}"
-            ),
-        }
-    ]
-    for frame_path in frame_paths:
-        content.append({"type": "input_image", "image_url": _image_data_url(frame_path)})
-    return [{"role": "user", "content": content}]
+def _repair_structured_result_payload(
+    *,
+    client,
+    model: str,
+    original_payload: dict[str, Any],
+    valid_evidence_segment_ids: set[str],
+    validation_warnings: list[str],
+) -> dict[str, Any] | None:
+    if not valid_evidence_segment_ids:
+        return None
+    repair_input = {
+        "valid_evidence_segment_ids": sorted(valid_evidence_segment_ids),
+        "validation_warnings": validation_warnings,
+        "original_result": original_payload,
+    }
+    try:
+        return _call_structured_response(
+            client=client,
+            model=model,
+            instructions=_repair_instructions(),
+            input_payload=json.dumps(repair_input, ensure_ascii=False, indent=2),
+            schema_name="content_analysis_repair",
+            schema=TEXT_ANALYSIS_SCHEMA,
+        )
+    except Exception:
+        return None
 
 
 def _collect_frame_paths(job_dir: Path, asset: ContentAsset) -> list[Path]:
@@ -244,18 +449,13 @@ def _collect_frame_paths(job_dir: Path, asset: ContentAsset) -> list[Path]:
     return frame_paths
 
 
-def _image_data_url(path: Path) -> str:
-    import base64
-
-    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/jpeg;base64,{encoded}"
-
-
 def _analysis_instructions() -> str:
     return (
         "You are analyzing captured web, audio, and video content. "
-        "Return a concise structured summary, key analysis points, and verification checks. "
-        "Only use claims grounded in the provided content and evidence segments."
+        "Return a concise structured summary, key points, analysis items, verification checks, and synthesis. "
+        "Only use claims grounded in the provided content and evidence segments. "
+        "When citing evidence, only use evidence segment ids that appear in the prompt. "
+        "Do not invent evidence ids. If no valid evidence id applies, return an empty list."
     )
 
 
@@ -265,3 +465,217 @@ def _multimodal_instructions() -> str:
         "Return visual findings, verification adjustments, and an overall assessment. "
         "Do not invent claims that are not supported by the frames or transcript."
     )
+
+
+def _repair_instructions() -> str:
+    return (
+        "You are repairing a structured analysis result. "
+        "You will receive a previous JSON result, a list of valid evidence segment ids, and validation warnings. "
+        "Return the same schema, but remove or replace invalid evidence references using only the valid ids provided. "
+        "If a claim no longer has valid evidence, use an empty evidence list and prefer conservative outputs."
+    )
+
+
+def _build_structured_result(payload: dict[str, object]) -> StructuredResult:
+    summary_payload = payload["summary"]
+    synthesis_payload = payload["synthesis"]
+    return StructuredResult(
+        summary=ResultSummary(
+            headline=str(summary_payload["headline"]).strip(),
+            short_text=str(summary_payload["short_text"]).strip(),
+        ),
+        key_points=[
+            KeyPoint(
+                id=str(item["id"]).strip(),
+                title=str(item["title"]).strip(),
+                details=str(item["details"]).strip(),
+                evidence_segment_ids=[str(value).strip() for value in item["evidence_segment_ids"] if str(value).strip()],
+            )
+            for item in payload["key_points"]
+        ],
+        analysis_items=[
+            AnalysisItem(
+                id=str(item["id"]).strip(),
+                kind=str(item["kind"]).strip(),
+                statement=str(item["statement"]).strip(),
+                evidence_segment_ids=[str(value).strip() for value in item["evidence_segment_ids"] if str(value).strip()],
+                confidence=_coerce_confidence(item["confidence"]),
+            )
+            for item in payload["analysis_items"]
+        ],
+        verification_items=[
+            VerificationItem(
+                id=str(item["id"]).strip(),
+                claim=str(item["claim"]).strip(),
+                status=str(item["status"]).strip(),
+                evidence_segment_ids=[str(value).strip() for value in item["evidence_segment_ids"] if str(value).strip()],
+                rationale=str(item["rationale"]).strip() if item["rationale"] is not None else None,
+                confidence=_coerce_confidence(item["confidence"]),
+            )
+            for item in payload["verification_items"]
+        ],
+        synthesis=SynthesisResult(
+            final_answer=str(synthesis_payload["final_answer"]).strip(),
+            next_steps=[str(item).strip() for item in synthesis_payload["next_steps"] if str(item).strip()],
+            open_questions=[str(item).strip() for item in synthesis_payload["open_questions"] if str(item).strip()],
+        ),
+    )
+
+
+def _coerce_confidence(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _serialize_key_point(item: KeyPoint) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "title": item.title,
+        "details": item.details,
+        "evidence_segment_ids": item.evidence_segment_ids,
+    }
+
+
+def _serialize_verification_item(item: VerificationItem) -> dict[str, object]:
+    return {
+        "id": item.id,
+        "claim": item.claim,
+        "status": item.status,
+        "evidence_segment_ids": item.evidence_segment_ids,
+        "rationale": item.rationale,
+        "confidence": item.confidence,
+    }
+
+
+def _serialize_warning_item(item: WarningItem) -> dict[str, object]:
+    return {
+        "code": item.code,
+        "severity": item.severity,
+        "message": item.message,
+        "related_refs": [
+            {
+                "kind": ref.kind,
+                "id": ref.id,
+                "role": ref.role,
+            }
+            for ref in item.related_refs
+        ],
+    }
+
+
+def _serialize_structured_result(result: StructuredResult | None) -> dict[str, object] | None:
+    if result is None:
+        return None
+    return {
+        "summary": None
+        if result.summary is None
+        else {
+            "headline": result.summary.headline,
+            "short_text": result.summary.short_text,
+        },
+        "key_points": [_serialize_key_point(item) for item in result.key_points],
+        "analysis_items": [
+            {
+                "id": item.id,
+                "kind": item.kind,
+                "statement": item.statement,
+                "evidence_segment_ids": item.evidence_segment_ids,
+                "confidence": item.confidence,
+            }
+            for item in result.analysis_items
+        ],
+        "verification_items": [_serialize_verification_item(item) for item in result.verification_items],
+        "synthesis": None
+        if result.synthesis is None
+        else {
+            "final_answer": result.synthesis.final_answer,
+            "next_steps": result.synthesis.next_steps,
+            "open_questions": result.synthesis.open_questions,
+        },
+        "warnings": [_serialize_warning_item(item) for item in result.warnings],
+    }
+
+
+def _validate_structured_result_evidence(
+    result: StructuredResult,
+    *,
+    valid_evidence_segment_ids: set[str],
+) -> list[WarningItem]:
+    warnings: list[WarningItem] = []
+    for item in result.key_points:
+        item.evidence_segment_ids = _filter_valid_evidence_ids(
+            item.evidence_segment_ids,
+            valid_evidence_segment_ids=valid_evidence_segment_ids,
+            warnings=warnings,
+            label="key_point",
+            item_id=item.id,
+        )
+    for item in result.analysis_items:
+        item.evidence_segment_ids = _filter_valid_evidence_ids(
+            item.evidence_segment_ids,
+            valid_evidence_segment_ids=valid_evidence_segment_ids,
+            warnings=warnings,
+            label="analysis_item",
+            item_id=item.id,
+        )
+    for item in result.verification_items:
+        item.evidence_segment_ids = _filter_valid_evidence_ids(
+            item.evidence_segment_ids,
+            valid_evidence_segment_ids=valid_evidence_segment_ids,
+            warnings=warnings,
+            label="verification_item",
+            item_id=item.id,
+        )
+        if item.status in {"supported", "partial"} and not item.evidence_segment_ids:
+            item.status = "unclear"
+            rationale = item.rationale or ""
+            suffix = "Evidence references were invalid or missing."
+            item.rationale = f"{rationale} {suffix}".strip()
+            warnings.append(
+                WarningItem(
+                    code="verification_downgraded",
+                    severity="warn",
+                    message=f"verification item {item.id} downgraded to unclear because no valid evidence ids remained",
+                    related_refs=[
+                        RelatedRef(kind="verification_item", id=item.id, role="downgraded_item"),
+                    ],
+                )
+            )
+    result.warnings.extend(warnings)
+    return warnings
+
+
+def _filter_valid_evidence_ids(
+    evidence_ids: list[str],
+    *,
+    valid_evidence_segment_ids: set[str],
+    warnings: list[WarningItem],
+    label: str,
+    item_id: str,
+) -> list[str]:
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for evidence_id in evidence_ids:
+        normalized = evidence_id.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        if normalized not in valid_evidence_segment_ids:
+            warnings.append(
+                WarningItem(
+                    code="invalid_evidence_reference",
+                    severity="warn",
+                    message=f"{label}:{item_id} referenced unknown evidence id: {normalized}",
+                    related_refs=[
+                        RelatedRef(kind=label, id=item_id, role="source_item"),
+                        RelatedRef(kind="evidence_segment", id=normalized, role="missing_reference"),
+                    ],
+                )
+            )
+            continue
+        filtered.append(normalized)
+    return filtered

@@ -34,6 +34,71 @@ class EvidenceSegment:
 
 
 @dataclass(slots=True)
+class ResultSummary:
+    headline: str
+    short_text: str
+
+
+@dataclass(slots=True)
+class KeyPoint:
+    id: str
+    title: str
+    details: str
+    evidence_segment_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class AnalysisItem:
+    id: str
+    kind: str
+    statement: str
+    evidence_segment_ids: list[str] = field(default_factory=list)
+    confidence: float | None = None
+
+
+@dataclass(slots=True)
+class VerificationItem:
+    id: str
+    claim: str
+    status: str
+    evidence_segment_ids: list[str] = field(default_factory=list)
+    rationale: str | None = None
+    confidence: float | None = None
+
+
+@dataclass(slots=True)
+class SynthesisResult:
+    final_answer: str
+    next_steps: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RelatedRef:
+    kind: str
+    id: str
+    role: str | None = None
+
+
+@dataclass(slots=True)
+class WarningItem:
+    code: str
+    severity: str
+    message: str
+    related_refs: list[RelatedRef] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class StructuredResult:
+    summary: ResultSummary | None = None
+    key_points: list[KeyPoint] = field(default_factory=list)
+    analysis_items: list[AnalysisItem] = field(default_factory=list)
+    verification_items: list[VerificationItem] = field(default_factory=list)
+    synthesis: SynthesisResult | None = None
+    warnings: list[WarningItem] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ContentAsset:
     source_platform: str
     source_url: str
@@ -50,6 +115,7 @@ class ContentAsset:
     analysis_items: list[str] = field(default_factory=list)
     verification_items: list[dict[str, Any]] = field(default_factory=list)
     synthesis: str | None = None
+    structured_result: StructuredResult | None = None
     language: str | None = None
     tags: list[str] = field(default_factory=list)
     media_urls: list[str] = field(default_factory=list)

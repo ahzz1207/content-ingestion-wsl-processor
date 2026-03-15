@@ -20,6 +20,7 @@ class Settings:
     whisper_model: str
     multimodal_frame_interval_seconds: int
     multimodal_max_frames: int
+    llm_provider: str
     openai_api_key: str | None
     openai_base_url: str | None
     analysis_model: str
@@ -34,11 +35,40 @@ def _read_bool(name: str, default: bool) -> bool:
     return value.lower() in {"1", "true", "yes", "on"}
 
 
+def _read_first_env(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _has_any_env(*names: str) -> bool:
+    return any(os.getenv(name) not in (None, "") for name in names)
+
+
 def load_settings() -> Settings:
     project_root = Path(__file__).resolve().parents[3]
     data_dir = project_root / "data"
     output_dir = Path(os.getenv("CONTENT_INGESTION_OUTPUT_DIR", data_dir / "artifacts"))
     shared_inbox_root = Path(os.getenv("CONTENT_INGESTION_SHARED_INBOX_ROOT", data_dir / "shared_inbox"))
+    zenmux_configured = _has_any_env(
+        "ZENMUX_API_KEY",
+        "ZENMUX_BASE_URL",
+        "ZENMUX_ANALYSIS_MODEL",
+        "ZENMUX_MULTIMODAL_MODEL",
+    )
+    llm_provider = "zenmux" if zenmux_configured else "openai"
+    openai_api_key = _read_first_env("OPENAI_API_KEY", "ZENMUX_API_KEY")
+    openai_base_url = _read_first_env("OPENAI_BASE_URL", "ZENMUX_BASE_URL")
+    if llm_provider == "zenmux" and openai_base_url is None:
+        openai_base_url = "https://zenmux.ai/api/v1"
+    analysis_model = _read_first_env("CONTENT_INGESTION_ANALYSIS_MODEL", "ZENMUX_ANALYSIS_MODEL")
+    if analysis_model is None:
+        analysis_model = "openai/gpt-5.2" if llm_provider == "zenmux" else "gpt-4.1"
+    multimodal_model = _read_first_env("CONTENT_INGESTION_MULTIMODAL_MODEL", "ZENMUX_MULTIMODAL_MODEL")
+    if multimodal_model is None:
+        multimodal_model = analysis_model
     settings = Settings(
         project_root=project_root,
         data_dir=data_dir,
@@ -58,10 +88,11 @@ def load_settings() -> Settings:
         whisper_model=os.getenv("CONTENT_INGESTION_WHISPER_MODEL", "base"),
         multimodal_frame_interval_seconds=int(os.getenv("CONTENT_INGESTION_FRAME_INTERVAL_SECONDS", "60")),
         multimodal_max_frames=int(os.getenv("CONTENT_INGESTION_MULTIMODAL_MAX_FRAMES", "8")),
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
-        openai_base_url=os.getenv("OPENAI_BASE_URL"),
-        analysis_model=os.getenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1"),
-        multimodal_model=os.getenv("CONTENT_INGESTION_MULTIMODAL_MODEL", "gpt-4.1"),
+        llm_provider=llm_provider,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
+        analysis_model=analysis_model,
+        multimodal_model=multimodal_model,
         llm_max_evidence_segments=int(os.getenv("CONTENT_INGESTION_LLM_MAX_EVIDENCE_SEGMENTS", "40")),
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)

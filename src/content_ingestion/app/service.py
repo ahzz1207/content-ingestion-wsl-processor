@@ -1,15 +1,17 @@
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 from typing import Iterable
 
 from content_ingestion.core.config import Settings
 from content_ingestion.core.enums import FetchStatus
 from content_ingestion.core.exceptions import UnsupportedSourceError
-from content_ingestion.core.models import FetchResult, SessionStatus
+from content_ingestion.core.models import ContentAsset, EvidenceSegment, FetchResult, SessionStatus
 from content_ingestion.inbox.processor import JobProcessor
 from content_ingestion.inbox.protocol import JobPaths, ensure_shared_inbox, inspect_job, iter_incoming_jobs
 from content_ingestion.inbox.watcher import InboxWatcher
 from content_ingestion.normalize.markdown import render_markdown
-from content_ingestion.pipeline.llm_pipeline import openai_sdk_available
+from content_ingestion.pipeline.llm_pipeline import analyze_asset, openai_sdk_available
 from content_ingestion.pipeline.media_pipeline import command_available
 from content_ingestion.session.browser_runtime import BrowserRuntime
 from content_ingestion.session.session_service import SessionService
@@ -186,6 +188,45 @@ class IngestionService:
             return []
         return []
 
+    def llm_smoke(self, text: str | None = None) -> dict[str, object]:
+        smoke_text = (text or "This is a smoke test paragraph for structured evidence-grounded analysis.").strip()
+        smoke_dir = self.settings.cache_dir / "llm_smoke" / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        smoke_dir.mkdir(parents=True, exist_ok=True)
+        evidence_id = f"smoke-evidence-{uuid4().hex[:8]}"
+        asset = ContentAsset(
+            source_platform="smoke",
+            source_url="about:llm-smoke",
+            canonical_url="about:llm-smoke",
+            content_shape="article",
+            title="LLM Smoke Test",
+            author="system",
+            content_text=smoke_text,
+            content_markdown=smoke_text,
+            evidence_segments=[
+                EvidenceSegment(
+                    id=evidence_id,
+                    kind="text_block",
+                    text=smoke_text,
+                    source="smoke/input",
+                )
+            ],
+        )
+        result = analyze_asset(job_dir=smoke_dir, asset=asset, settings=self.settings)
+        structured_result = result.structured_result
+        return {
+            "status": result.status,
+            "provider": self.settings.llm_provider,
+            "analysis_model": result.analysis_model,
+            "multimodal_model": result.multimodal_model,
+            "summary": result.summary,
+            "key_point_count": len(result.key_points),
+            "analysis_item_count": len(result.analysis_items),
+            "verification_item_count": len(result.verification_items),
+            "structured_result_available": structured_result is not None,
+            "output_path": None if result.output_path is None else str(smoke_dir / Path(result.output_path)),
+            "warnings": result.warnings,
+        }
+
     def doctor(self) -> Iterable[str]:
         report = [
             f"project_root={self.settings.project_root}",
@@ -199,7 +240,9 @@ class IngestionService:
             f"whisper_available={command_available(self.settings.whisper_command, fallback='whisper')}",
             f"whisper_model={self.settings.whisper_model}",
             f"openai_sdk_available={openai_sdk_available()}",
+            f"llm_provider={self.settings.llm_provider}",
             f"openai_api_key_present={bool(self.settings.openai_api_key)}",
+            f"openai_base_url={self.settings.openai_base_url}",
             f"analysis_model={self.settings.analysis_model}",
             f"multimodal_model={self.settings.multimodal_model}",
         ]

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from content_ingestion.core.config import Settings
+from content_ingestion.core.evidence import build_evidence_segment_id
 from content_ingestion.core.models import ContentAsset, ContentAttachment, EvidenceSegment
 from content_ingestion.normalize.cleaning import clean_text
 
@@ -77,7 +78,14 @@ def process_media_asset(*, job_dir: Path, asset: ContentAsset, settings: Setting
             result.analysis_text = asset.analysis_text
             transcript_segments = [
                 EvidenceSegment(
-                    id=f"transcript-segment-{index}",
+                    id=build_evidence_segment_id(
+                        kind="transcript",
+                        source=str(segment["source"]),
+                        text=str(segment["text"]),
+                        sequence=index,
+                        start_ms=segment.get("start_ms"),
+                        end_ms=segment.get("end_ms"),
+                    ),
                     kind="transcript",
                     text=segment["text"],
                     source=segment["source"],

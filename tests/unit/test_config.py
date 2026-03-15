@@ -37,5 +37,22 @@ def test_load_settings_reads_openai_env(monkeypatch) -> None:
 
     assert settings.openai_api_key == "sk-test"
     assert settings.openai_base_url == "https://example.invalid/v1"
+    assert settings.llm_provider == "openai"
     assert settings.analysis_model == "gpt-4.1-mini"
     assert settings.multimodal_model == "gpt-4.1"
+
+
+def test_load_settings_reads_zenmux_env(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("CONTENT_INGESTION_ANALYSIS_MODEL", raising=False)
+    monkeypatch.delenv("CONTENT_INGESTION_MULTIMODAL_MODEL", raising=False)
+    monkeypatch.setenv("ZENMUX_API_KEY", "zm-test")
+
+    settings = load_settings()
+
+    assert settings.llm_provider == "zenmux"
+    assert settings.openai_api_key == "zm-test"
+    assert settings.openai_base_url == "https://zenmux.ai/api/v1"
+    assert settings.analysis_model == "openai/gpt-5.2"
+    assert settings.multimodal_model == "openai/gpt-5.2"

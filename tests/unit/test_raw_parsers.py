@@ -32,6 +32,95 @@ def test_parse_html_payload_extracts_title_and_text(tmp_path: Path) -> None:
     assert asset.evidence_segments
 
 
+def test_parse_generic_article_prefers_content_container_over_full_body(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.html"
+    payload.write_text(
+        """
+        <html>
+          <head><title>Generic Story</title></head>
+          <body>
+            <nav>Home Search Sign in</nav>
+            <article class="post-content">
+              <h1>Generic Story</h1>
+              <p>Lead paragraph.</p>
+              <p>Main article body.</p>
+            </article>
+            <aside>Recommended stories</aside>
+            <footer>Copyright Example Media</footer>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    asset = parse_payload(
+        payload,
+        {
+            "job_id": "job-generic",
+            "source_url": "https://example.com/story",
+            "platform": "generic",
+            "collector": "windows-client",
+            "collected_at": "2026-03-12T15:30:00+08:00",
+            "content_type": "html",
+        },
+    )
+
+    assert "Lead paragraph." in asset.content_text
+    assert "Main article body." in asset.content_text
+    assert "Home Search Sign in" not in asset.content_text
+    assert "Recommended stories" not in asset.content_text
+    assert "Copyright Example Media" not in asset.content_text
+
+
+def test_parse_html_preserves_image_caption_and_table_rows_as_blocks(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.html"
+    payload.write_text(
+        """
+        <html>
+          <head><title>Chip Story</title></head>
+          <body>
+            <article class="article-content">
+              <h2>Supply shift</h2>
+              <p>Paragraph body.</p>
+              <figure>
+                <img src="demo.jpg" alt="Factory floor image" />
+                <figcaption>Production line in Wuxi.</figcaption>
+              </figure>
+              <table>
+                <tr><th>Quarter</th><th>Revenue</th></tr>
+                <tr><td>Q1</td><td>10</td></tr>
+              </table>
+            </article>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    asset = parse_payload(
+        payload,
+        {
+            "job_id": "job-structured-html",
+            "source_url": "https://example.com/chip-story",
+            "platform": "generic",
+            "collector": "windows-client",
+            "collected_at": "2026-03-12T15:30:00+08:00",
+            "content_type": "html",
+        },
+    )
+
+    block_kinds = [block.kind for block in asset.blocks]
+    assert "heading" in block_kinds
+    assert "paragraph" in block_kinds
+    assert "image_caption" in block_kinds
+    assert "table_row" in block_kinds
+    assert any("Production line in Wuxi." == block.text for block in asset.blocks)
+    assert any("Quarter | Revenue" == block.text for block in asset.blocks)
+    assert any("Q1 | 10" == block.text for block in asset.blocks)
+    assert any(segment.kind == "image_caption" for segment in asset.evidence_segments)
+    assert any(segment.kind == "table_row" for segment in asset.evidence_segments)
+
+
 def test_parse_html_payload_prefers_hints_and_parses_published_at(tmp_path: Path) -> None:
     payload = tmp_path / "payload.html"
     payload.write_text(
@@ -51,7 +140,7 @@ def test_parse_html_payload_prefers_hints_and_parses_published_at(tmp_path: Path
             "content_type": "html",
             "title_hint": "Hint Title",
             "author_hint": "Hint Author",
-            "published_at_hint": "2026\u5e743\u670814\u65e5 12:58",
+            "published_at_hint": "2026年3月14日 12:58",
         },
     )
 
@@ -66,8 +155,50 @@ def test_parse_html_payload_prefers_hints_and_parses_published_at(tmp_path: Path
     assert asset.published_at.minute == 58
 
 
+def test_parse_wechat_html_payload_trims_shell_text(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.html"
+    payload.write_text(
+        """
+        <html>
+          <head><title>存储涨完，MLCC要接力了吗？</title></head>
+          <body>
+            <div id="img-content">
+              <h1>存储涨完，MLCC要接力了吗？</h1>
+              <p>第一段正文。</p>
+              <p>第二段正文。</p>
+              <p>预览时标签不可点</p>
+              <p>关闭更多</p>
+              <p>留言暂无留言</p>
+              <p>微信扫一扫</p>
+            </div>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    asset = parse_payload(
+        payload,
+        {
+            "job_id": "job-wechat",
+            "source_url": "https://mp.weixin.qq.com/s/demo",
+            "platform": "wechat",
+            "collector": "windows-client",
+            "collected_at": "2026-03-12T15:30:00+08:00",
+            "content_type": "html",
+            "title_hint": "存储涨完，MLCC要接力了吗？",
+        },
+    )
+
+    assert "第一段正文" in asset.content_text
+    assert "第二段正文" in asset.content_text
+    assert "预览时标签不可点" not in asset.content_text
+    assert "留言暂无留言" not in asset.content_text
+    assert "微信扫一扫" not in asset.content_text
+
+
 def test_optional_datetime_parses_localized_numeric_timestamp() -> None:
-    parsed = optional_datetime("2026\u5e743\u670813\u65e5 13:30")
+    parsed = optional_datetime("2026年3月13日 13:30")
 
     assert parsed == datetime(2026, 3, 13, 13, 30)
 
@@ -166,3 +297,41 @@ def test_parse_html_payload_builds_attachment_inventory_and_evidence_segments(tm
     assert [attachment.kind for attachment in asset.attachments] == ["audio", "subtitle"]
     assert any(segment.kind == "subtitle" for segment in asset.evidence_segments)
     assert any("hello world" in segment.text for segment in asset.evidence_segments)
+    assert len({segment.id for segment in asset.evidence_segments}) == len(asset.evidence_segments)
+    assert any(segment.id.startswith("text-block-") for segment in asset.evidence_segments)
+    assert any(segment.id.startswith("subtitle-") for segment in asset.evidence_segments)
+
+    asset_again = parse_payload(
+        payload,
+        {
+            "job_id": "job4",
+            "source_url": "https://example.com/video",
+            "platform": "bilibili",
+            "collector": "windows-client",
+            "collected_at": "2026-03-12T15:30:00+08:00",
+            "content_type": "html",
+            "content_shape": "video",
+        },
+        capture_manifest={
+            "primary_payload": {"path": "payload.html"},
+            "artifacts": [
+                {"path": "payload.html", "role": "focused_capture", "media_type": "text/html", "is_primary": True},
+                {
+                    "path": "attachments/video/video.mp3",
+                    "role": "audio_file",
+                    "media_type": "audio/mpeg",
+                    "size_bytes": 5,
+                    "is_primary": False,
+                },
+                {
+                    "path": "attachments/video/video.en.vtt",
+                    "role": "subtitle",
+                    "media_type": "text/vtt",
+                    "size_bytes": subtitle_path.stat().st_size,
+                    "is_primary": False,
+                },
+            ],
+        },
+    )
+
+    assert [segment.id for segment in asset.evidence_segments] == [segment.id for segment in asset_again.evidence_segments]

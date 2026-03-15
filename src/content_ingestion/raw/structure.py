@@ -5,8 +5,44 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from content_ingestion.core.evidence import build_evidence_segment_id
 from content_ingestion.core.models import ContentAttachment, ContentBlock, EvidenceSegment
 from content_ingestion.normalize.cleaning import clean_text
+
+
+def build_blocks_from_records(
+    records: list[dict[str, Any]],
+    *,
+    title: str | None = None,
+) -> list[ContentBlock]:
+    blocks: list[ContentBlock] = []
+    if title:
+        blocks.append(
+            ContentBlock(
+                id="heading-1",
+                kind="heading",
+                text=title,
+                heading_level=1,
+                source="title",
+            )
+        )
+    for index, record in enumerate(records, start=1):
+        kind = _optional_str(record.get("kind")) or "paragraph"
+        text = clean_text(str(record.get("text") or ""))
+        if not text:
+            continue
+        heading_level = _optional_int(record.get("heading_level"))
+        block_id = f"{kind}-{index}"
+        blocks.append(
+            ContentBlock(
+                id=block_id,
+                kind=kind,
+                text=text,
+                heading_level=heading_level,
+                source=_optional_str(record.get("source")) or "html",
+            )
+        )
+    return blocks
 
 
 def build_text_blocks(text: str, *, title: str | None = None) -> list[ContentBlock]:
@@ -70,13 +106,19 @@ def build_evidence_segments(
     attachments: list[ContentAttachment],
 ) -> list[EvidenceSegment]:
     segments: list[EvidenceSegment] = []
-    for block in blocks:
-        if block.kind != "paragraph" or not block.text.strip():
+    for block_index, block in enumerate(blocks, start=1):
+        if block.kind not in {"paragraph", "list_item", "image_caption", "table_row"} or not block.text.strip():
             continue
+        evidence_kind = "text_block" if block.kind in {"paragraph", "list_item"} else block.kind
         segments.append(
             EvidenceSegment(
-                id=f"segment-{len(segments) + 1}",
-                kind="text_block",
+                id=build_evidence_segment_id(
+                    kind=evidence_kind,
+                    source=block.id,
+                    text=block.text,
+                    sequence=block_index,
+                ),
+                kind=evidence_kind,
                 text=block.text,
                 source=block.id,
             )
@@ -86,10 +128,17 @@ def build_evidence_segments(
         if attachment.kind not in {"subtitle", "transcript", "danmaku"}:
             continue
         attachment_path = job_dir.joinpath(*PurePosixPath(attachment.path).parts)
-        for item in _read_transcript_segments(attachment_path):
+        for item_index, item in enumerate(_read_transcript_segments(attachment_path), start=1):
             segments.append(
                 EvidenceSegment(
-                    id=f"segment-{len(segments) + 1}",
+                    id=build_evidence_segment_id(
+                        kind=attachment.kind,
+                        source=attachment.path,
+                        text=str(item["text"]),
+                        sequence=item_index,
+                        start_ms=_optional_int(item.get("start_ms")),
+                        end_ms=_optional_int(item.get("end_ms")),
+                    ),
                     kind=attachment.kind,
                     text=item["text"],
                     source=attachment.path,

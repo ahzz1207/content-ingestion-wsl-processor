@@ -47,6 +47,9 @@ def _build_parser() -> argparse.ArgumentParser:
     watch_inbox.add_argument("--once", action="store_true")
     watch_inbox.add_argument("--interval-seconds", type=float, default=5.0)
 
+    llm_smoke = subparsers.add_parser("llm-smoke")
+    llm_smoke.add_argument("--text")
+
     subparsers.add_parser("doctor")
     return parser
 
@@ -134,6 +137,9 @@ def main() -> None:
             print("watcher_stopped=keyboard_interrupt")
         for path in outputs:
             print(f"job_output={path}")
+        return
+    if args.command == "llm-smoke":
+        print(json.dumps(container.service.llm_smoke(text=args.text), ensure_ascii=False, indent=2))
         return
     if args.command == "doctor":
         for line in container.service.doctor():

@@ -1,0 +1,10 @@
+{
+  "job_id": "20260312_193000_sample_wechat_html",
+  "source_url": "https://mp.weixin.qq.com/s/example",
+  "platform": "wechat",
+  "collector": "windows-client",
+  "collected_at": "2026-03-12T19:30:00+08:00",
+  "content_type": "html",
+  "title_hint": "测试公众号文章标题",
+  "author_hint": "OpenClaw Weekly"
+}

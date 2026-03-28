@@ -9,6 +9,7 @@ from typing import Any
 
 from content_ingestion.core.config import Settings
 from content_ingestion.core.models import (
+    VisualFinding,
     AnalysisItem,
     ContentAsset,
     KeyPoint,
@@ -83,6 +84,8 @@ TEXT_ANALYSIS_SCHEMA = {
                 "required": ["id", "claim", "status", "evidence_segment_ids", "rationale", "confidence"],
             },
         },
+        "content_kind": {"type": "string"},
+        "author_stance": {"type": "string"},
         "synthesis": {
             "type": "object",
             "additionalProperties": False,
@@ -94,7 +97,7 @@ TEXT_ANALYSIS_SCHEMA = {
             "required": ["final_answer", "next_steps", "open_questions"],
         },
     },
-    "required": ["summary", "key_points", "analysis_items", "verification_items", "synthesis"],
+    "required": ["content_kind", "author_stance", "summary", "key_points", "analysis_items", "verification_items", "synthesis"],
 }
 
 MULTIMODAL_SCHEMA = {
@@ -157,6 +160,8 @@ class LlmAnalysisResult:
     multimodal_model: str | None = None
     steps: list[dict[str, object]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    content_kind: str | None = None
+    author_stance: str | None = None
     output_path: str | None = None
     request_artifacts: dict[str, str] = field(default_factory=dict)
 
@@ -274,8 +279,11 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
     else:
         result.steps.append({"name": "validate_evidence_references", "status": "success", "details": "all references valid"})
     result.structured_result = structured_result
+    result.content_kind = structured_result.content_kind
+    result.author_stance = structured_result.author_stance
     if structured_result.summary is not None:
-        result.summary = structured_result.summary.short_text.strip()
+        if structured_result.summary and isinstance(structured_result.summary.short_text, str):
+            result.summary = structured_result.summary.short_text.strip()
     result.key_points = structured_result.key_points
     result.analysis_items = [item.statement for item in structured_result.analysis_items if item.statement.strip()]
     result.verification_items = [_serialize_verification_item(item) for item in structured_result.verification_items]
@@ -311,17 +319,12 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
         )
         if result.structured_result is None:
             result.structured_result = StructuredResult()
-        result.analysis_items.extend(
-            [str(item["finding"]).strip() for item in multimodal_payload["visual_findings"] if str(item["finding"]).strip()]
-        )
         for item in multimodal_payload["visual_findings"]:
-            result.structured_result.analysis_items.append(
-                AnalysisItem(
+            result.structured_result.visual_findings.append(
+                VisualFinding(
                     id=str(item["id"]).strip(),
-                    kind="visual_finding",
-                    statement=str(item["finding"]).strip(),
-                    evidence_segment_ids=[],
-                    confidence=None,
+                    finding=str(item["finding"]).strip(),
+                    evidence_frame_paths=[str(p) for p in item.get("evidence_frame_paths", [])],
                 )
             )
         for item in multimodal_payload["verification_adjustments"]:
@@ -351,6 +354,8 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
         json.dumps(
             {
                 "status": result.status,
+                "content_kind": result.content_kind,
+                "author_stance": result.author_stance,
                 "provider": result.provider,
                 "base_url": result.base_url,
                 "schema_mode": result.schema_mode,
@@ -434,7 +439,8 @@ def _repair_structured_result_payload(
             schema_name="content_analysis_repair",
             schema=TEXT_ANALYSIS_SCHEMA,
         )
-    except Exception:
+    except Exception as repair_exc:
+        logger.warning("structured result repair attempt failed: %s", repair_exc)
         return None
 
 
@@ -450,13 +456,38 @@ def _collect_frame_paths(job_dir: Path, asset: ContentAsset) -> list[Path]:
 
 
 def _analysis_instructions() -> str:
-    return (
-        "You are analyzing captured web, audio, and video content. "
-        "Return a concise structured summary, key points, analysis items, verification checks, and synthesis. "
-        "Only use claims grounded in the provided content and evidence segments. "
-        "When citing evidence, only use evidence segment ids that appear in the prompt. "
-        "Do not invent evidence ids. If no valid evidence id applies, return an empty list."
-    )
+    return """You are a critical-thinking analyst. Analyze the provided content following four goals exactly.
+
+GOAL 1 — OVERVIEW
+Identify the central topic and the author's core position. Express this as a precise headline and one sentence capturing the author's core claim. Stay grounded in what the author actually says.
+Also identify:
+- content_kind: the type of content (choose one: article, opinion, analysis, report, interview, tutorial, review, news)
+- author_stance: the author's rhetorical posture (choose one: objective, advocacy, critical, skeptical, promotional, explanatory, mixed)
+
+GOAL 2 — VIEWPOINTS
+Extract every distinct argument or claim the author makes. Aim for 5 to 10 viewpoints. For each:
+- Write a concise title naming the argument.
+- Write a detailed explanation of 3 to 5 sentences capturing the author's reasoning, supporting context, and implication.
+Evidence annotation is secondary: never shorten an explanation to attach evidence IDs. If no evidence segment matches, use an empty list.
+
+GOAL 3 — CRITICAL CHECK
+Identify claims that are questionable, unsupported, or in tension with established knowledge. For each:
+- State the exact claim.
+- Assess its status: supported / partial / unsupported / unclear.
+- Provide a rationale explaining your assessment.
+Only flag claims that genuinely merit scrutiny. Do not manufacture doubts about well-supported statements.
+
+GOAL 4 — DIVERGENT THINKING
+Generate non-obvious implications and alternative perspectives the content raises but does not address. Produce at least 3 items. Each must be labeled:
+- "implication": a logical consequence of the author's position not explicitly stated.
+- "alternative": a different reading, counter-argument, or perspective that reframes the author's position.
+Do not restate the author's content. Add analytical value beyond what is on the page.
+
+GENERAL RULES
+- Use only evidence segment IDs that appear in the evidence_segments list. Never invent IDs.
+- If no segment matches, use an empty evidence_segment_ids list.
+- Do not apply word limits to any field.
+- All analysis_items must have kind equal to "implication" or "alternative". No other values are valid."""
 
 
 def _multimodal_instructions() -> str:
@@ -479,7 +510,11 @@ def _repair_instructions() -> str:
 def _build_structured_result(payload: dict[str, object]) -> StructuredResult:
     summary_payload = payload["summary"]
     synthesis_payload = payload["synthesis"]
+    content_kind = str(payload.get("content_kind") or "").strip() or None
+    author_stance = str(payload.get("author_stance") or "").strip() or None
     return StructuredResult(
+        content_kind=content_kind,
+        author_stance=author_stance,
         summary=ResultSummary(
             headline=str(summary_payload["headline"]).strip(),
             short_text=str(summary_payload["short_text"]).strip(),
@@ -571,6 +606,8 @@ def _serialize_structured_result(result: StructuredResult | None) -> dict[str, o
     if result is None:
         return None
     return {
+        "content_kind": result.content_kind,
+        "author_stance": result.author_stance,
         "summary": None
         if result.summary is None
         else {
@@ -587,6 +624,14 @@ def _serialize_structured_result(result: StructuredResult | None) -> dict[str, o
                 "confidence": item.confidence,
             }
             for item in result.analysis_items
+        ],
+        "visual_findings": [
+            {
+                "id": item.id,
+                "finding": item.finding,
+                "evidence_frame_paths": item.evidence_frame_paths,
+            }
+            for item in result.visual_findings
         ],
         "verification_items": [_serialize_verification_item(item) for item in result.verification_items],
         "synthesis": None

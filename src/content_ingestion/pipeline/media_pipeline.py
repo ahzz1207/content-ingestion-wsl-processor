@@ -65,11 +65,16 @@ def process_media_asset(*, job_dir: Path, asset: ContentAsset, settings: Setting
                 settings=settings,
                 result=result,
             )
+        _is_bilibili = asset.source_platform == "bilibili"
+        _whisper_model = settings.bilibili_whisper_model if _is_bilibili else settings.whisper_model
+        _whisper_language = settings.bilibili_whisper_language if _is_bilibili else None
         transcript = _transcribe_audio(
             source_path=transcript_input,
             output_dir=analysis_dir / "transcript",
             settings=settings,
             result=result,
+            whisper_model=_whisper_model,
+            whisper_language=_whisper_language,
         )
         if transcript is not None:
             asset.transcript_text = transcript["text"]
@@ -251,19 +256,23 @@ def _transcribe_audio(
     output_dir: Path,
     settings: Settings,
     result: MediaProcessingResult,
+    whisper_model: str | None = None,
+    whisper_language: str | None = None,
 ) -> dict[str, object] | None:
+    whisper_model = whisper_model or settings.whisper_model
     whisper_command = _resolve_command(settings.whisper_command, "whisper")
     if whisper_command is None:
         result.warnings.append("whisper is unavailable; transcript generation skipped")
         result.steps.append({"name": "transcribe_audio", "status": "warn", "details": "whisper unavailable"})
         return None
     output_dir.mkdir(parents=True, exist_ok=True)
-    completed = subprocess.run(
+    try:
+        completed = subprocess.run(
         [
             whisper_command,
             str(source_path),
             "--model",
-            settings.whisper_model,
+            whisper_model,
             "--task",
             "transcribe",
             "--output_format",
@@ -272,13 +281,19 @@ def _transcribe_audio(
             str(output_dir),
             "--verbose",
             "False",
+            *(["--language", whisper_language] if whisper_language else []),
         ],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=settings.whisper_timeout_seconds,
         check=False,
     )
+    except subprocess.TimeoutExpired:
+        result.warnings.append(f"whisper timed out after {settings.whisper_timeout_seconds}s; transcript generation skipped")
+        result.steps.append({"name": "transcribe_audio", "status": "warn", "details": f"timeout after {settings.whisper_timeout_seconds}s"})
+        return None
     transcript_json = output_dir / f"{source_path.stem}.json"
     transcript_txt = output_dir / f"{source_path.stem}.txt"
     transcript = _load_whisper_transcript(transcript_json, transcript_txt)
@@ -292,7 +307,7 @@ def _transcribe_audio(
         encoding="utf-8",
     )
     (output_dir / "transcript.txt").write_text(str(transcript["text"]), encoding="utf-8")
-    result.steps.append({"name": "transcribe_audio", "status": "success", "details": settings.whisper_model})
+    result.steps.append({"name": "transcribe_audio", "status": "success", "details": whisper_model})
     return transcript
 
 

@@ -26,6 +26,10 @@ class Settings:
     analysis_model: str
     multimodal_model: str
     llm_max_evidence_segments: int
+    whisper_timeout_seconds: int
+    watcher_interval_seconds: int
+    bilibili_whisper_model: str
+    bilibili_whisper_language: str | None
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -49,7 +53,10 @@ def _has_any_env(*names: str) -> bool:
 
 def load_settings() -> Settings:
     project_root = Path(__file__).resolve().parents[3]
-    data_dir = project_root / "data"
+    # Runtime data lives outside the repo worktree by default so that
+    # git reset / reclone / clean operations do not destroy live data.
+    # Override with CONTENT_INGESTION_DATA_DIR when needed.
+    data_dir = Path(os.getenv("CONTENT_INGESTION_DATA_DIR", Path.home() / ".content-ingestion-wsl"))
     output_dir = Path(os.getenv("CONTENT_INGESTION_OUTPUT_DIR", data_dir / "artifacts"))
     shared_inbox_root = Path(os.getenv("CONTENT_INGESTION_SHARED_INBOX_ROOT", data_dir / "shared_inbox"))
     zenmux_configured = _has_any_env(
@@ -93,7 +100,11 @@ def load_settings() -> Settings:
         openai_base_url=openai_base_url,
         analysis_model=analysis_model,
         multimodal_model=multimodal_model,
-        llm_max_evidence_segments=int(os.getenv("CONTENT_INGESTION_LLM_MAX_EVIDENCE_SEGMENTS", "40")),
+        llm_max_evidence_segments=int(os.getenv("CONTENT_INGESTION_LLM_MAX_EVIDENCE_SEGMENTS", "100")),
+        whisper_timeout_seconds=int(os.getenv("CONTENT_INGESTION_WHISPER_TIMEOUT_SECONDS", "300")),
+        watcher_interval_seconds=int(os.getenv("CONTENT_INGESTION_WATCHER_INTERVAL_SECONDS", "2")),
+        bilibili_whisper_model=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_MODEL", "medium"),
+        bilibili_whisper_language=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_LANGUAGE") or None,
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.sessions_dir.mkdir(parents=True, exist_ok=True)

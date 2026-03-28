@@ -12,11 +12,13 @@ from content_ingestion.inbox.protocol import (
     CAPTURE_MANIFEST_FILENAME,
     ERROR_FILENAME,
     JobProtocolError,
+    METADATA_FILENAME,
     NORMALIZED_JSON_FILENAME,
     NORMALIZED_MD_FILENAME,
     PIPELINE_FILENAME,
     READY_FILENAME,
     STATUS_FILENAME,
+    find_payload_file,
     get_processing_job,
     load_capture_manifest,
     validate_job,
@@ -27,6 +29,13 @@ from content_ingestion.pipeline.media_pipeline import process_media_asset
 from content_ingestion.raw import parse_payload
 
 logger = logging.getLogger(__name__)
+
+REQUIRED_OUTPUT_FILES = (
+    NORMALIZED_JSON_FILENAME,
+    NORMALIZED_MD_FILENAME,
+    PIPELINE_FILENAME,
+    STATUS_FILENAME,
+)
 
 
 class JobProcessor:
@@ -50,15 +59,20 @@ class JobProcessor:
             asset = parse_payload(payload_path, metadata, capture_manifest=capture_manifest)
             if not asset.content_markdown:
                 asset.content_markdown = render_markdown(asset)
-            target_dir = self._move_job(job.job_dir, job.processed_dir)
+            # All processing and file writes happen while still in processing/
             self._write_success_outputs(
-                target_dir=target_dir,
+                target_dir=job.job_dir,
                 asset=asset,
                 metadata=metadata,
                 payload_path=payload_path,
                 capture_manifest=capture_manifest,
                 started_at=started_at,
             )
+            # Verify all required outputs exist before leaving processing/
+            self._verify_required_outputs(job.job_dir)
+            # Two-step atomic handoff: processing/ -> finalizing/ -> processed/
+            finalizing_dir = self._move_job(job.job_dir, job.finalizing_dir)
+            target_dir = self._move_job(finalizing_dir, job.processed_dir)
             return target_dir
         except Exception as exc:
             return self._handle_failure(job, exc, started_at)
@@ -67,6 +81,13 @@ class JobProcessor:
         if target_dir.exists():
             raise JobProtocolError(f"Target directory already exists: {target_dir}")
         return Path(shutil.move(str(source_dir), str(target_dir)))
+
+    def _verify_required_outputs(self, job_dir: Path) -> None:
+        missing = [f for f in REQUIRED_OUTPUT_FILES if not (job_dir / f).exists()]
+        if missing:
+            raise JobProtocolError(
+                "Required output files missing after processing: " + ", ".join(missing)
+            )
 
     def _write_success_outputs(
         self,
@@ -474,6 +495,14 @@ class JobProcessor:
                 ),
             }
         )
+        visual_findings_payload = [
+            {
+                "id": item.id,
+                "finding": item.finding,
+                "evidence_frame_paths": item.evidence_frame_paths,
+            }
+            for item in (result.visual_findings if hasattr(result, "visual_findings") else [])
+        ]
         warnings_payload = [
             {
                 "id": f"warning-{index}",
@@ -512,9 +541,12 @@ class JobProcessor:
             warnings=warnings_payload,
         )
         return {
+            "content_kind": result.content_kind,
+            "author_stance": result.author_stance,
             "summary": summary_payload,
             "key_points": key_points_payload,
             "analysis_items": analysis_items_payload,
+            "visual_findings": visual_findings_payload,
             "verification_items": verification_items_payload,
             "synthesis": synthesis_payload,
             "warnings": warnings_payload,
@@ -869,18 +901,37 @@ class JobProcessor:
             ready_path.unlink()
 
     def _handle_failure(self, job, exc: Exception, started_at: datetime) -> Path:
-        payload_filename = job.payload_path.name if job.payload_path else None
+        # Determine the actual location of the job first — it may have been moved
+        # to finalizing/ before the failure occurred.
+        if job.job_dir.exists():
+            source_dir = job.job_dir
+        elif job.finalizing_dir.exists():
+            logger.warning(
+                "job %s found in finalizing/ during failure handling — rescuing to failed/",
+                job.job_id,
+            )
+            source_dir = job.finalizing_dir
+        else:
+            logger.error(
+                "job %s not found in processing/ or finalizing/ during failure handling",
+                job.job_id,
+            )
+            raise exc
+        # Read metadata from the actual source directory.
+        metadata_path = source_dir / METADATA_FILENAME
+        payload_path = find_payload_file(source_dir)
+        payload_filename = payload_path.name if payload_path else None
         content_type = None
         source_url = None
         try:
-            if job.metadata_path.exists():
-                metadata = json.loads(job.metadata_path.read_text(encoding="utf-8"))
+            if metadata_path.exists():
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
                 content_type = metadata.get("content_type")
                 source_url = metadata.get("source_url")
         except Exception:
             logger.warning("failed to read metadata during failure handling for job %s", job.job_id)
         try:
-            target_dir = self._move_job(job.job_dir, job.failed_dir)
+            target_dir = self._move_job(source_dir, job.failed_dir)
         except Exception as move_exc:
             logger.exception(
                 "failed to move job %s into failed/: original=%s move=%s",

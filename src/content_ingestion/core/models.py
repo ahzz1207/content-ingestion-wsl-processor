@@ -89,12 +89,22 @@ class WarningItem:
 
 
 @dataclass(slots=True)
+class VisualFinding:
+    id: str
+    finding: str
+    evidence_frame_paths: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class StructuredResult:
+    content_kind: str | None = None
+    author_stance: str | None = None
     summary: ResultSummary | None = None
     key_points: list[KeyPoint] = field(default_factory=list)
     analysis_items: list[AnalysisItem] = field(default_factory=list)
     verification_items: list[VerificationItem] = field(default_factory=list)
     synthesis: SynthesisResult | None = None
+    visual_findings: list[VisualFinding] = field(default_factory=list)
     warnings: list[WarningItem] = field(default_factory=list)
 
 

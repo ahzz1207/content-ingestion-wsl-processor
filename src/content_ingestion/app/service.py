@@ -176,14 +176,14 @@ class IngestionService:
         shared_root: Path,
         *,
         once: bool = False,
-        interval_seconds: float = 5.0,
+        interval_seconds: float | None = None,
     ) -> list[Path]:
         ensure_shared_inbox(shared_root)
         watcher = InboxWatcher(shared_root, JobProcessor())
         if once:
             return watcher.scan_once()
         try:
-            watcher.watch(interval_seconds=interval_seconds)
+            watcher.watch(interval_seconds=interval_seconds if interval_seconds is not None else self.settings.watcher_interval_seconds)
         except KeyboardInterrupt:
             return []
         return []

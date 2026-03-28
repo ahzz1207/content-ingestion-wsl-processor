@@ -461,3 +461,234 @@ def test_serialize_structured_result_includes_typed_warning_refs() -> None:
     assert payload["evidence_backlinks"] == {}
     assert payload["result_index"]["warning-1"]["section"] == "warnings"
     assert payload["result_index"]["warning-1"]["evidence_segment_ids"] == ["missing-id"]
+
+
+def _make_minimal_job(inbox, job_id: str) -> Path:
+    """Create a minimal valid job in processing/ for state machine tests."""
+    job_dir = inbox.processing / job_id
+    job_dir.mkdir(parents=True)
+    (job_dir / "payload.html").write_text(
+        "<html><head><title>Test</title></head><body><p>content</p></body></html>",
+        encoding="utf-8",
+    )
+    (job_dir / "metadata.json").write_text(
+        __import__("json").dumps({
+            "job_id": job_id,
+            "source_url": "https://example.com/article",
+            "collector": "windows-client",
+            "collected_at": "2026-03-28T10:00:00+00:00",
+            "content_type": "html",
+        }),
+        encoding="utf-8",
+    )
+    (job_dir / "READY").write_text("", encoding="utf-8")
+    return job_dir
+
+
+def test_processed_dir_only_populated_after_all_files_written(tmp_path: Path) -> None:
+    """Job must land in processed/ only after normalized.json, normalized.md,
+    pipeline.json, and status.json are all present (W1 finalizing stage)."""
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+    job_dir = _make_minimal_job(inbox, "jobW1a")
+
+    target_dir = JobProcessor().process(job_dir)
+
+    # target_dir must be in processed/
+    assert target_dir.parent == shared_root / "processed"
+
+    # All required files must be present in processed/
+    for filename in ("normalized.json", "normalized.md", "pipeline.json", "status.json"):
+        assert (target_dir / filename).exists(), f"Missing required file: {filename}"
+
+    # processing/ must be empty (job moved away)
+    assert not (shared_root / "processing" / "jobW1a").exists()
+
+    # finalizing/ must be empty (transit only, job moved to processed/)
+    assert not (shared_root / "finalizing" / "jobW1a").exists()
+
+
+def test_finalizing_dir_created_by_ensure_shared_inbox(tmp_path: Path) -> None:
+    """ensure_shared_inbox must create finalizing/ alongside the other stage dirs."""
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+    assert inbox.finalizing.exists()
+    assert (shared_root / "finalizing").is_dir()
+
+
+def test_verify_required_outputs_raises_on_missing_files(tmp_path: Path) -> None:
+    """_verify_required_outputs must raise JobProtocolError when required files are absent."""
+    from content_ingestion.inbox.protocol import JobProtocolError
+    processor = JobProcessor()
+    job_dir = tmp_path / "job_incomplete"
+    job_dir.mkdir()
+    # Only write normalized.md — the rest are missing
+    (job_dir / "normalized.md").write_text("content", encoding="utf-8")
+
+    try:
+        processor._verify_required_outputs(job_dir)  # noqa: SLF001
+        assert False, "Expected JobProtocolError"
+    except JobProtocolError as exc:
+        assert "normalized.json" in str(exc)
+        assert "pipeline.json" in str(exc)
+        assert "status.json" in str(exc)
+        assert "normalized.md" not in str(exc)  # this one is present
+
+
+def test_verify_required_outputs_passes_when_all_files_present(tmp_path: Path) -> None:
+    """_verify_required_outputs must not raise when all required files exist."""
+    from content_ingestion.inbox.protocol import JobProtocolError
+    processor = JobProcessor()
+    job_dir = tmp_path / "job_complete"
+    job_dir.mkdir()
+    for filename in ("normalized.json", "normalized.md", "pipeline.json", "status.json"):
+        (job_dir / filename).write_text("{}", encoding="utf-8")
+
+    processor._verify_required_outputs(job_dir)  # noqa: SLF001 — must not raise
+
+
+def test_handle_failure_rescues_job_stuck_in_finalizing(tmp_path: Path) -> None:
+    """If a job ends up in finalizing/ (e.g. finalizing->processed move failed),
+    _handle_failure must move it to failed/ rather than leaving it stuck."""
+    from content_ingestion.inbox.protocol import JobProtocolError, ensure_shared_inbox
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+
+    # Simulate a job that somehow ended up in finalizing/
+    finalizing_dir = inbox.finalizing / "jobStuck"
+    finalizing_dir.mkdir(parents=True)
+    (finalizing_dir / "metadata.json").write_text(
+        __import__("json").dumps({
+            "job_id": "jobStuck",
+            "source_url": "https://example.com",
+            "collector": "test",
+            "collected_at": "2026-03-28T00:00:00+00:00",
+            "content_type": "html",
+        }),
+        encoding="utf-8",
+    )
+    (finalizing_dir / "READY").write_text("", encoding="utf-8")
+
+    # Build a JobPaths that points to processing/ (as if it came from get_processing_job)
+    from content_ingestion.inbox.protocol import JobPaths
+    from datetime import datetime, timezone
+    job = JobPaths(shared_root=shared_root, stage_dir=inbox.processing, job_id="jobStuck")
+
+    processor = JobProcessor()
+    exc = JobProtocolError("simulated move failure")
+    started_at = datetime.now(timezone.utc)
+
+    # _handle_failure should rescue from finalizing/ → failed/
+    result_dir = processor._handle_failure(job, exc, started_at)  # noqa: SLF001
+
+    assert result_dir.parent == shared_root / "failed"
+    assert not finalizing_dir.exists()
+    assert (shared_root / "failed" / "jobStuck").exists()
+
+
+def test_handle_failure_rescue_from_finalizing_preserves_metadata(tmp_path):
+    import json as _json
+    from content_ingestion.inbox.protocol import (
+        JobPaths, JobProtocolError, ensure_shared_inbox, METADATA_FILENAME,
+    )
+    from content_ingestion.inbox.processor import JobProcessor
+    from datetime import datetime, timezone
+
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+    finalizing_job = inbox.finalizing / "jobMeta"
+    finalizing_job.mkdir(parents=True)
+    (finalizing_job / METADATA_FILENAME).write_text(
+        _json.dumps({
+            "job_id": "jobMeta",
+            "source_url": "https://example.com/article",
+            "collector": "test",
+            "collected_at": "2026-03-28T00:00:00+00:00",
+            "content_type": "html",
+        }),
+        encoding="utf-8",
+    )
+    (finalizing_job / "payload.html").write_text("<p>content</p>", encoding="utf-8")
+    (finalizing_job / "READY").write_text("", encoding="utf-8")
+
+    job = JobPaths(shared_root=shared_root, stage_dir=inbox.processing, job_id="jobMeta")
+    processor = JobProcessor()
+    exc = JobProtocolError("simulated error")
+    started_at = datetime.now(timezone.utc)
+
+    result_dir = processor._handle_failure(job, exc, started_at)
+
+    assert result_dir.parent == shared_root / "failed"
+    error = _json.loads((result_dir / "error.json").read_text(encoding="utf-8"))
+    assert error["content_type"] == "html", f"content_type lost: {error}"
+    assert error["source_url"] == "https://example.com/article", f"source_url lost: {error}"
+    assert error["payload_filename"] == "payload.html", f"payload_filename lost: {error}"
+
+
+def test_visual_findings_in_result_not_in_analysis_items(tmp_path, monkeypatch):
+    import json as _json
+    from content_ingestion.core.models import (
+        AnalysisItem, ResultSummary, StructuredResult, SynthesisResult, VisualFinding,
+    )
+    from content_ingestion.inbox.processor import JobProcessor
+    from content_ingestion.inbox.protocol import ensure_shared_inbox
+    from content_ingestion.pipeline.llm_pipeline import LlmAnalysisResult
+    from content_ingestion.pipeline.media_pipeline import MediaProcessingResult
+
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+    job_dir = inbox.processing / "jobVF"
+    job_dir.mkdir(parents=True)
+    (job_dir / "payload.html").write_text(
+        "<html><head><title>T</title></head><body><p>body</p></body></html>",
+        encoding="utf-8",
+    )
+    (job_dir / "metadata.json").write_text(
+        _json.dumps({
+            "job_id": "jobVF",
+            "source_url": "https://example.com",
+            "collector": "test",
+            "collected_at": "2026-03-28T00:00:00+00:00",
+            "content_type": "html",
+        }),
+        encoding="utf-8",
+    )
+    (job_dir / "READY").write_text("", encoding="utf-8")
+
+    structured = StructuredResult(
+        content_kind="article",
+        author_stance="neutral",
+        summary=ResultSummary(headline="H", short_text="S"),
+        analysis_items=[
+            AnalysisItem(id="an-1", kind="fact", statement="Normal point",
+                         evidence_segment_ids=[], confidence=0.9)
+        ],
+        visual_findings=[
+            VisualFinding(id="vf-1", finding="Frame shows X",
+                          evidence_frame_paths=["analysis/frames/frame-001.jpg"])
+        ],
+        synthesis=SynthesisResult(final_answer="F", next_steps=[], open_questions=[]),
+    )
+    fake_llm = LlmAnalysisResult(
+        status="pass", provider="openai",
+        structured_result=structured, summary="S",
+        analysis_items=["Normal point"], verification_items=[], synthesis="F",
+    )
+    monkeypatch.setattr("content_ingestion.inbox.processor.analyze_asset",
+                        lambda **_kw: fake_llm)
+    monkeypatch.setattr("content_ingestion.inbox.processor.process_media_asset",
+                        lambda **_kw: MediaProcessingResult(status="skipped", steps=[]))
+
+    target_dir = JobProcessor().process(job_dir)
+    normalized = _json.loads((target_dir / "normalized.json").read_text(encoding="utf-8"))
+    result = normalized["asset"]["result"] or {}
+
+    assert "visual_findings" in result, f"visual_findings missing: {list(result.keys())}"
+    assert result["visual_findings"][0]["id"] == "vf-1"
+    assert result["visual_findings"][0]["finding"] == "Frame shows X"
+    for item in result.get("analysis_items", []):
+        assert item.get("kind") != "visual_finding", "visual_finding leaked into analysis_items"
+    assert len(result["analysis_items"]) == 1
+    assert result["analysis_items"][0]["id"] == "an-1"
+    assert result.get("content_kind") == "article"
+    assert result.get("author_stance") == "neutral"

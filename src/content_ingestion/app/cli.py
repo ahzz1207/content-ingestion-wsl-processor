@@ -45,7 +45,7 @@ def _build_parser() -> argparse.ArgumentParser:
     watch_inbox = subparsers.add_parser("watch-inbox")
     watch_inbox.add_argument("shared_root", nargs="?", type=Path)
     watch_inbox.add_argument("--once", action="store_true")
-    watch_inbox.add_argument("--interval-seconds", type=float, default=5.0)
+    watch_inbox.add_argument("--interval-seconds", type=float, default=None)
 
     llm_smoke = subparsers.add_parser("llm-smoke")
     llm_smoke.add_argument("--text")

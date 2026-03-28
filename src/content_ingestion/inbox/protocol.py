@@ -10,6 +10,7 @@ INCOMING_DIRNAME = "incoming"
 PROCESSING_DIRNAME = "processing"
 PROCESSED_DIRNAME = "processed"
 FAILED_DIRNAME = "failed"
+FINALIZING_DIRNAME = "finalizing"
 METADATA_FILENAME = "metadata.json"
 READY_FILENAME = "READY"
 STATUS_FILENAME = "status.json"
@@ -35,6 +36,7 @@ class SharedInboxPaths:
     processing: Path
     processed: Path
     failed: Path
+    finalizing: Path
 
 
 @dataclass(slots=True)
@@ -75,6 +77,10 @@ class JobPaths:
     def failed_dir(self) -> Path:
         return self.shared_root / FAILED_DIRNAME / self.job_id
 
+    @property
+    def finalizing_dir(self) -> Path:
+        return self.shared_root / FINALIZING_DIRNAME / self.job_id
+
 
 @dataclass(slots=True)
 class JobValidationResult:
@@ -94,6 +100,7 @@ def get_shared_inbox_paths(root: Path) -> SharedInboxPaths:
         processing=root / PROCESSING_DIRNAME,
         processed=root / PROCESSED_DIRNAME,
         failed=root / FAILED_DIRNAME,
+        finalizing=root / FINALIZING_DIRNAME,
     )
 
 
@@ -103,6 +110,7 @@ def ensure_shared_inbox(root: Path) -> SharedInboxPaths:
     paths.processing.mkdir(parents=True, exist_ok=True)
     paths.processed.mkdir(parents=True, exist_ok=True)
     paths.failed.mkdir(parents=True, exist_ok=True)
+    paths.finalizing.mkdir(parents=True, exist_ok=True)
     return paths
 
 

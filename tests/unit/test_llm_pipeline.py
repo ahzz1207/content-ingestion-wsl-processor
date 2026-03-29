@@ -14,8 +14,38 @@ class _FakeResponses:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        model = kwargs["model"]
-        if model == "gpt-4.1-mini":
+        schema_name = kwargs.get("text", {}).get("format", {}).get("name", "")
+        if schema_name == "reader_analysis":
+            payload = {
+                "document_type": "article",
+                "thesis": "Demo thesis",
+                "chapter_map": [
+                    {
+                        "id": "ch-1",
+                        "title": "Chapter 1",
+                        "summary": "Chapter 1 summary",
+                        "block_ids": ["b1"],
+                        "role": "argument",
+                        "weight": "high",
+                    }
+                ],
+                "argument_skeleton": [
+                    {
+                        "id": "arg-1",
+                        "claim": "Main claim",
+                        "chapter_id": "ch-1",
+                        "claim_type": "fact",
+                    }
+                ],
+                "content_signals": {
+                    "evidence_density": "medium",
+                    "rhetoric_density": "low",
+                    "has_novel_claim": True,
+                    "has_data": False,
+                    "estimated_depth": "medium",
+                },
+            }
+        elif schema_name == "content_analysis":
             payload = {
                 "summary": {"headline": "Demo headline", "short_text": "Short summary"},
                 "key_points": [
@@ -29,14 +59,14 @@ class _FakeResponses:
                 "analysis_items": [
                     {
                         "id": "an-1",
-                        "kind": "fact",
+                        "kind": "implication",
                         "statement": "Point A",
                         "evidence_segment_ids": ["e1"],
                         "confidence": 0.9,
                     },
                     {
                         "id": "an-2",
-                        "kind": "observation",
+                        "kind": "alternative",
                         "statement": "Point B",
                         "evidence_segment_ids": [],
                         "confidence": 0.6,
@@ -54,6 +84,8 @@ class _FakeResponses:
                 ],
                 "synthesis": {
                     "final_answer": "Final synthesis",
+                    "what_is_new": "Novel perspective on the topic",
+                    "tensions": ["Tension between claim A and claim B"],
                     "next_steps": ["Review later"],
                     "open_questions": ["What is missing?"],
                 },
@@ -144,25 +176,46 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert result.structured_result.synthesis is not None
     assert result.structured_result.synthesis.final_answer == "Final synthesis"
     assert result.output_path == "analysis/llm/analysis_result.json"
-    assert len(fake_client.responses.calls) == 2
+    assert len(fake_client.responses.calls) == 3
     assert (job_dir / "analysis" / "llm" / "analysis_result.json").exists()
     assert (job_dir / "analysis" / "llm" / "text_request.json").exists()
     assert (job_dir / "analysis" / "llm" / "multimodal_request.json").exists()
-    text_input = fake_client.responses.calls[0]["input"]
-    assert text_input[0]["content"][0]["type"] == "input_text"
-    text_context = json.loads(text_input[0]["content"][0]["text"])
-    assert text_context["task"]["task_id"] == "text_analysis_v1"
-    assert text_context["task"]["input_modality"] == "text_image"
-    assert text_context["content_policy"]["policy_id"] == "video_text_first_v1"
-    assert text_context["content_policy"]["supported_input_modalities"] == ["text", "text_image"]
-    assert text_context["document"]["allowed_evidence_ids"] == ["e1"]
-    assert text_context["document"]["image_inputs"] == []
-    multimodal_input = fake_client.responses.calls[1]["input"]
+    reader_input_check = fake_client.responses.calls[0]["input"]
+    reader_ctx = json.loads(reader_input_check[0]["content"][0]["text"])
+    assert reader_ctx["task"]["task_id"] == "reader_pass_v1"
+    assert "transcript_text" in reader_ctx["document"]
+    synthesizer_input = fake_client.responses.calls[1]["input"]
+    assert synthesizer_input[0]["content"][0]["type"] == "input_text"
+    synthesizer_context = json.loads(synthesizer_input[0]["content"][0]["text"])
+    assert synthesizer_context["task"]["task_id"] == "synthesizer_pass_v1"
+    assert synthesizer_context["task"]["input_modality"] == "text_image"
+    assert synthesizer_context["content_policy"]["policy_id"] == "video_text_first_v1"
+    assert synthesizer_context["content_policy"]["supported_input_modalities"] == ["text", "text_image"]
+    assert synthesizer_context["document"]["allowed_evidence_ids"] == ["e1"]
+    assert synthesizer_context["document"]["image_inputs"] == []
+    assert "reader_output" in synthesizer_context["document"]
+    assert synthesizer_context["document"]["reader_output"]["document_type"] == "article"
+    assert synthesizer_context["document"]["selected_block_count"] >= 1
+    assert synthesizer_context["document"]["selected_evidence_count"] >= 1
+    multimodal_input = fake_client.responses.calls[2]["input"]
     assert multimodal_input[0]["content"][0]["type"] == "input_text"
     multimodal_context = json.loads(multimodal_input[0]["content"][0]["text"])
     assert multimodal_context["task"]["input_modality"] == "text_image"
     assert multimodal_context["content_policy"]["policy_id"] == "video_text_first_v1"
     assert multimodal_context["document"]["image_inputs"] == ["analysis/frames/frame-001.jpg"]
+    assert result.structured_result.synthesis.what_is_new == "Novel perspective on the topic"
+    assert result.structured_result.synthesis.tensions == ["Tension between claim A and claim B"]
+    assert result.structured_result.chapter_map[0].id == "ch-1"
+    assert result.reader_result_path == "analysis/llm/reader_result.json"
+    assert result.synthesizer_result_path == "analysis/llm/synthesizer_result.json"
+    assert (job_dir / "analysis" / "llm" / "reader_result.json").exists()
+    assert (job_dir / "analysis" / "llm" / "synthesizer_result.json").exists()
+    analysis_result_payload = json.loads((job_dir / "analysis" / "llm" / "analysis_result.json").read_text(encoding="utf-8"))
+    assert analysis_result_payload["reader_result_path"] == "analysis/llm/reader_result.json"
+    assert analysis_result_payload["synthesizer_result_path"] == "analysis/llm/synthesizer_result.json"
+    assert analysis_result_payload["result"]["chapter_map"][0]["id"] == "ch-1"
+    assert analysis_result_payload["result"]["synthesis"]["what_is_new"] == "Novel perspective on the topic"
+    assert analysis_result_payload["result"]["synthesis"]["tensions"] == ["Tension between claim A and claim B"]
 
 
 def test_analyze_asset_skips_without_api_key(monkeypatch, tmp_path: Path) -> None:
@@ -480,3 +533,117 @@ def test_text_analysis_envelope_includes_content_images_but_not_analysis_frames(
     assert envelope.task.input_modality == "text_image"
     assert envelope.image_paths == [str(content_image)]
     assert envelope.document["image_inputs"] == ["figure-1.jpg"]
+
+
+def test_analyze_asset_repair_preserves_chapter_map(monkeypatch, tmp_path: Path) -> None:
+    """Repair path must pass reader_payload through so chapter_map is not lost."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1-mini")
+    settings = load_settings()
+
+    class _RepairWithReaderResponses:
+        def __init__(self) -> None:
+            self.call_count = 0
+
+        def create(self, **kwargs):
+            self.call_count += 1
+            schema_name = kwargs.get("text", {}).get("format", {}).get("name", "")
+            if schema_name == "reader_analysis":
+                payload = {
+                    "document_type": "article",
+                    "thesis": "Test thesis",
+                    "chapter_map": [
+                        {
+                            "id": "ch-1",
+                            "title": "Chapter 1",
+                            "summary": "Summary of chapter 1",
+                            "block_ids": ["b1"],
+                            "role": "argument",
+                            "weight": "high",
+                        }
+                    ],
+                    "argument_skeleton": [],
+                    "content_signals": {
+                        "evidence_density": "medium",
+                        "rhetoric_density": "low",
+                        "has_novel_claim": False,
+                        "has_data": False,
+                        "estimated_depth": "medium",
+                    },
+                }
+            elif self.call_count == 2:
+                # First synthesizer call — invalid evidence
+                payload = {
+                    "summary": {"headline": "Headline", "short_text": "Summary"},
+                    "key_points": [
+                        {
+                            "id": "kp-1",
+                            "title": "Point A",
+                            "details": "Details",
+                            "evidence_segment_ids": ["missing-id"],
+                        }
+                    ],
+                    "analysis_items": [],
+                    "verification_items": [],
+                    "synthesis": {
+                        "final_answer": "Answer",
+                        "what_is_new": "Something new",
+                        "tensions": [],
+                        "next_steps": [],
+                        "open_questions": [],
+                    },
+                }
+            else:
+                # Repair call — valid evidence
+                payload = {
+                    "summary": {"headline": "Headline", "short_text": "Summary"},
+                    "key_points": [
+                        {
+                            "id": "kp-1",
+                            "title": "Point A",
+                            "details": "Details",
+                            "evidence_segment_ids": ["e1"],
+                        }
+                    ],
+                    "analysis_items": [],
+                    "verification_items": [],
+                    "synthesis": {
+                        "final_answer": "Answer",
+                        "what_is_new": "Something new",
+                        "tensions": [],
+                        "next_steps": [],
+                        "open_questions": [],
+                    },
+                }
+            return type("Response", (), {"output_text": json.dumps(payload, ensure_ascii=False)})()
+
+    class _RepairWithReaderClient:
+        def __init__(self) -> None:
+            self.responses = _RepairWithReaderResponses()
+
+    monkeypatch.setattr("content_ingestion.pipeline.llm_pipeline.openai_sdk_available", lambda: True)
+    monkeypatch.setattr(
+        "content_ingestion.pipeline.llm_pipeline._create_client",
+        lambda settings: _RepairWithReaderClient(),
+    )
+
+    asset = ContentAsset(
+        source_platform="generic",
+        source_url="https://example.com",
+        title="Demo",
+        content_text="hello",
+        blocks=[ContentBlock(id="b1", kind="paragraph", text="Paragraph 1")],
+        evidence_segments=[EvidenceSegment(id="e1", kind="text_block", text="Evidence 1", source="paragraph-1")],
+    )
+
+    result = analyze_asset(job_dir=tmp_path, asset=asset, settings=settings)
+
+    assert result.status == "pass"
+    assert result.structured_result is not None
+    # chapter_map must survive the repair path
+    assert len(result.structured_result.chapter_map) == 1
+    assert result.structured_result.chapter_map[0].id == "ch-1"
+    assert result.structured_result.key_points[0].evidence_segment_ids == ["e1"]
+    analysis_result_payload = json.loads((tmp_path / "analysis" / "llm" / "analysis_result.json").read_text(encoding="utf-8"))
+    assert analysis_result_payload["result"]["chapter_map"][0]["id"] == "ch-1"
+    assert analysis_result_payload["result"]["synthesis"]["what_is_new"] == "Something new"

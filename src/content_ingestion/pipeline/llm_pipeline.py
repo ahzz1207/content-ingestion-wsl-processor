@@ -11,6 +11,7 @@ from content_ingestion.core.config import Settings
 from content_ingestion.core.models import (
     VisualFinding,
     AnalysisItem,
+    ChapterEntry,
     ContentAsset,
     KeyPoint,
     RelatedRef,
@@ -22,6 +23,8 @@ from content_ingestion.core.models import (
 )
 from content_ingestion.pipeline.llm_contract import (
     build_multimodal_verification_envelope,
+    build_reader_envelope,
+    build_synthesizer_envelope,
     build_text_analysis_envelope,
 )
 
@@ -91,13 +94,67 @@ TEXT_ANALYSIS_SCHEMA = {
             "additionalProperties": False,
             "properties": {
                 "final_answer": {"type": "string"},
+                "what_is_new": {"type": "string"},
+                "tensions": {"type": "array", "items": {"type": "string"}},
                 "next_steps": {"type": "array", "items": {"type": "string"}},
                 "open_questions": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["final_answer", "next_steps", "open_questions"],
+            "required": ["final_answer", "what_is_new", "tensions", "next_steps", "open_questions"],
         },
     },
     "required": ["content_kind", "author_stance", "summary", "key_points", "analysis_items", "verification_items", "synthesis"],
+}
+
+READER_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "document_type": {"type": "string", "enum": ["article", "opinion", "report", "tutorial", "interview", "thread"]},
+        "thesis": {"type": "string"},
+        "chapter_map": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "title": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "block_ids": {"type": "array", "items": {"type": "string"}},
+                    "role": {"type": "string", "enum": ["setup", "argument", "evidence", "counterpoint", "conclusion", "background"]},
+                    "weight": {"type": "string", "enum": ["high", "medium", "low"]},
+                },
+                "required": ["id", "title", "summary", "block_ids", "role", "weight"],
+            },
+        },
+        "argument_skeleton": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "id": {"type": "string"},
+                    "claim": {"type": "string"},
+                    "chapter_id": {"type": "string"},
+                    "claim_type": {"type": "string", "enum": ["fact", "interpretation", "implication", "rhetoric"]},
+                },
+                "required": ["id", "claim", "chapter_id", "claim_type"],
+            },
+        },
+        "content_signals": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "evidence_density": {"type": "string", "enum": ["high", "medium", "low"]},
+                "rhetoric_density": {"type": "string", "enum": ["high", "medium", "low"]},
+                "has_novel_claim": {"type": "boolean"},
+                "has_data": {"type": "boolean"},
+                "estimated_depth": {"type": "string", "enum": ["shallow", "medium", "deep"]},
+            },
+            "required": ["evidence_density", "rhetoric_density", "has_novel_claim", "has_data", "estimated_depth"],
+        },
+    },
+    "required": ["document_type", "thesis", "chapter_map", "argument_skeleton", "content_signals"],
 }
 
 MULTIMODAL_SCHEMA = {
@@ -163,6 +220,8 @@ class LlmAnalysisResult:
     content_kind: str | None = None
     author_stance: str | None = None
     output_path: str | None = None
+    reader_result_path: str | None = None
+    synthesizer_result_path: str | None = None
     request_artifacts: dict[str, str] = field(default_factory=dict)
 
 
@@ -227,22 +286,66 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
     result.text_input_modality = text_envelope.task.input_modality
     result.multimodal_input_modality = text_envelope.content_policy.multimodal_input_modality
     result.task_intent = text_envelope.task_intent
-    text_request_path = analysis_dir / "text_request.json"
+    # === Reader Pass ===
+    reader_envelope = build_reader_envelope(
+        asset=asset,
+        job_dir=job_dir,
+        settings=settings,
+        model=settings.analysis_model,
+    )
+    reader_request_path = analysis_dir / "reader_request.json"
+    reader_request_path.write_text(
+        json.dumps(reader_envelope.to_serializable_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    result.request_artifacts["reader"] = reader_request_path.relative_to(job_dir).as_posix()
+    reader_payload = _call_structured_response(
+        client=client,
+        model=settings.analysis_model,
+        instructions=_reader_instructions(),
+        input_payload=reader_envelope.to_model_input(),
+        schema_name="reader_analysis",
+        schema=READER_SCHEMA,
+    )
+    reader_result_path = analysis_dir / "reader_result.json"
+    reader_result_path.write_text(
+        json.dumps(reader_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    result.reader_result_path = reader_result_path.relative_to(job_dir).as_posix()
+    result.steps.append({"name": "llm_reader_pass", "status": "success", "details": settings.analysis_model})
+
+    # === Synthesizer Pass ===
+    synthesizer_envelope = build_synthesizer_envelope(
+        asset=asset,
+        reader_output=reader_payload,
+        job_dir=job_dir,
+        settings=settings,
+        model=settings.analysis_model,
+        output_schema_name="content_analysis",
+    )
+    text_request_path = analysis_dir / "text_request.json"  # kept for backward compat
     text_request_path.write_text(
-        json.dumps(text_envelope.to_serializable_dict(), ensure_ascii=False, indent=2),
+        json.dumps(synthesizer_envelope.to_serializable_dict(), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     result.request_artifacts["text"] = text_request_path.relative_to(job_dir).as_posix()
     text_payload = _call_structured_response(
         client=client,
         model=settings.analysis_model,
-        instructions=_analysis_instructions(),
-        input_payload=text_envelope.to_model_input(),
+        instructions=_synthesizer_instructions(),
+        input_payload=synthesizer_envelope.to_model_input(),
         schema_name="content_analysis",
         schema=TEXT_ANALYSIS_SCHEMA,
     )
-    result.steps.append({"name": "llm_text_analysis", "status": "success", "details": settings.analysis_model})
-    structured_result = _build_structured_result(text_payload)
+    synthesizer_result_path = analysis_dir / "synthesizer_result.json"
+    synthesizer_result_path.write_text(
+        json.dumps(text_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    result.synthesizer_result_path = synthesizer_result_path.relative_to(job_dir).as_posix()
+    result.steps.append({"name": "llm_synthesizer_pass", "status": "success", "details": settings.analysis_model})
+    structured_result = _build_structured_result(text_payload, reader_payload=reader_payload)
     valid_evidence_segment_ids = {segment.id for segment in asset.evidence_segments}
     validation_warnings = _validate_structured_result_evidence(
         structured_result,
@@ -257,7 +360,7 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
             validation_warnings=[item.message for item in validation_warnings],
         )
         if repaired_payload is not None:
-            repaired_result = _build_structured_result(repaired_payload)
+            repaired_result = _build_structured_result(repaired_payload, reader_payload=reader_payload)
             repaired_warnings = _validate_structured_result_evidence(
                 repaired_result,
                 valid_evidence_segment_ids=valid_evidence_segment_ids,
@@ -365,6 +468,8 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
                 "multimodal_input_modality": result.multimodal_input_modality,
                 "task_intent": result.task_intent,
                 "skip_reason": result.skip_reason,
+                "reader_result_path": result.reader_result_path,
+                "synthesizer_result_path": result.synthesizer_result_path,
                 "request_artifacts": result.request_artifacts,
                 "summary": result.summary,
                 "key_points": [_serialize_key_point(item) for item in result.key_points],
@@ -455,6 +560,74 @@ def _collect_frame_paths(job_dir: Path, asset: ContentAsset) -> list[Path]:
     return frame_paths
 
 
+def _reader_instructions() -> str:
+    return """You are a structural analyst. Your only job is to identify the shape of the content — not to evaluate it.
+
+DO NOT extract opinions, write summaries, or make quality judgments.
+
+YOUR TASKS:
+1. DOCUMENT TYPE — Classify the content type.
+2. THESIS — State the author's core claim in 1-2 sentences based strictly on the text.
+3. CHAPTER MAP — Identify 3-8 semantic sections. For each section:
+   - summary: 1-2 sentences capturing what this section actually says (not evaluates).
+   - block_ids: the block id values from the input that belong to this section.
+   - role: setup / argument / evidence / counterpoint / conclusion / background.
+   - weight: high (core to understanding) / medium / low (context or filler).
+4. ARGUMENT SKELETON — For each chapter, state the main claim.
+   - claim_type: fact (verifiable assertion) / interpretation (reading or inference) / implication (unstated consequence) / rhetoric (persuasion without direct claim).
+5. CONTENT SIGNALS — Signal properties to guide downstream analysis.
+
+RULES:
+- block_ids must exactly match ids from the input document blocks.
+- Chapter count must be between 3 and 8. If content is short, use 3.
+- Chapter summaries must be based on what the section says, not your judgment of its quality.
+- Do not skip any major section."""
+
+
+def _synthesizer_instructions() -> str:
+    return """You are a critical-thinking analyst. You receive a document plus a Reader's structural analysis.
+Use the reader_output — especially chapter_map summaries and argument_skeleton — to focus your analysis.
+You do not need to re-read all blocks in detail. Trust the Reader's structure.
+
+GOAL 1 — VIEWPOINTS (key_points)
+Focus on chapters with weight="high" in the Reader's chapter_map.
+For each key chapter, extract 1-2 core arguments. Aim for 5-10 key_points total.
+For each key_point, write details covering THREE dimensions:
+  (a) What is the argument?
+  (b) What logic and evidence does the author use to support it?
+  (c) How does this argument relate to others in the piece (reinforces / contradicts / builds on)?
+Never shorten the details to make room for evidence IDs. Evidence annotation is secondary.
+
+GOAL 2 — CRITICAL CHECK (verification_items)
+Flag claims that are questionable, unsupported, or in tension with established knowledge.
+Explicitly label each as: "text directly states" or "analyst inference."
+Status: supported / partial / unsupported / unclear.
+
+GOAL 3 — DIVERGENT THINKING (analysis_items)
+Generate 3-5 implications and alternative perspectives the content raises but does not address.
+Label each: "implication" (logical consequence not stated) or "alternative" (different reading or counter-argument).
+
+GOAL 4 — SYNTHESIS
+final_answer: What should a reader take away as a judgment? Not a restatement of arguments.
+
+what_is_new: What is genuinely novel in this content?
+  Do NOT report what the author claims is new.
+  DO identify: what information, perspective, or combination is actually new compared to common knowledge on this topic?
+  If nothing is genuinely new, say so plainly.
+
+tensions: List real tensions in the author's position. Three types to consider:
+  - Internal tension: claims within the piece that contradict or undercut each other.
+  - Evidence-judgment tension: places where the evidence cited does not fully support the conclusion drawn.
+  - Expression-argument tension: where the rhetorical goal seems to conflict with the argument structure.
+  If no real tensions exist, return an empty list. Do not manufacture tensions.
+
+GENERAL RULES:
+- Use only evidence_segment_ids from the evidence_segments list. Never invent IDs.
+- content_kind: article / opinion / analysis / report / interview / tutorial / review / news.
+- author_stance: objective / advocacy / critical / skeptical / promotional / explanatory / mixed.
+- All analysis_items must have kind = "implication" or "alternative" only."""
+
+
 def _analysis_instructions() -> str:
     return """You are a critical-thinking analyst. Analyze the provided content following four goals exactly.
 
@@ -507,11 +680,28 @@ def _repair_instructions() -> str:
     )
 
 
-def _build_structured_result(payload: dict[str, object]) -> StructuredResult:
+def _build_structured_result(
+    payload: dict[str, object],
+    *,
+    reader_payload: dict[str, object] | None = None,
+) -> StructuredResult:
     summary_payload = payload["summary"]
     synthesis_payload = payload["synthesis"]
     content_kind = str(payload.get("content_kind") or "").strip() or None
     author_stance = str(payload.get("author_stance") or "").strip() or None
+    chapter_map = []
+    if reader_payload:
+        chapter_map = [
+            ChapterEntry(
+                id=str(ch["id"]).strip(),
+                title=str(ch["title"]).strip(),
+                role=str(ch["role"]).strip(),
+                summary=str(ch.get("summary") or "").strip(),
+                block_ids=[str(bid).strip() for bid in ch.get("block_ids", [])],
+                weight=str(ch.get("weight", "medium")).strip(),
+            )
+            for ch in reader_payload.get("chapter_map", [])
+        ]
     return StructuredResult(
         content_kind=content_kind,
         author_stance=author_stance,
@@ -553,7 +743,10 @@ def _build_structured_result(payload: dict[str, object]) -> StructuredResult:
             final_answer=str(synthesis_payload["final_answer"]).strip(),
             next_steps=[str(item).strip() for item in synthesis_payload["next_steps"] if str(item).strip()],
             open_questions=[str(item).strip() for item in synthesis_payload["open_questions"] if str(item).strip()],
+            what_is_new=str(synthesis_payload.get("what_is_new") or "").strip() or None,
+            tensions=[str(item).strip() for item in synthesis_payload.get("tensions", []) if str(item).strip()],
         ),
+        chapter_map=chapter_map,
     )
 
 
@@ -638,9 +831,22 @@ def _serialize_structured_result(result: StructuredResult | None) -> dict[str, o
         if result.synthesis is None
         else {
             "final_answer": result.synthesis.final_answer,
+            "what_is_new": result.synthesis.what_is_new,
+            "tensions": result.synthesis.tensions,
             "next_steps": result.synthesis.next_steps,
             "open_questions": result.synthesis.open_questions,
         },
+        "chapter_map": [
+            {
+                "id": item.id,
+                "title": item.title,
+                "role": item.role,
+                "summary": item.summary,
+                "block_ids": item.block_ids,
+                "weight": item.weight,
+            }
+            for item in result.chapter_map
+        ],
         "warnings": [_serialize_warning_item(item) for item in result.warnings],
     }
 

@@ -1,3 +1,5 @@
+import json
+import logging
 from html import unescape
 import re
 from pathlib import Path
@@ -70,12 +72,22 @@ _GENERIC_CONTAINER_SIGNALS = (
     "rich_media_content",
     "story-body",
     "main-content",
+    "note-text",
+    "desc",
 )
 _GENERIC_SHELL_PATTERNS = (
     re.compile(r"^\s*(home|about|menu|search|sign in|sign up)\s*$", re.I),
     re.compile(r"^\s*(copyright|all rights reserved)\b", re.I),
     re.compile(r"^\s*(related articles|recommended|you may also like)\b", re.I),
 )
+_XHS_INTERACTION_KEYWORDS = frozenset({
+    "姐妹们", "宝子们", "点个赞", "关注一下", "收藏备用",
+    "双击屏幕", "快来看", "赶快冲", "必收藏",
+})
+_XHS_HASHTAG_RE = re.compile(r"^#\S+(\s+#\S+)*\s*$")
+_XHS_EMOJI_RE = re.compile(r"[\U0001F300-\U0001F9FF\U00002600-\U000027BF]")
+_XHS_INTERACTION_TAIL_THRESHOLD = 4
+
 _WECHAT_FOOTER_MARKERS = tuple(item for marker in _WECHAT_FOOTER_MARKERS_RAW for item in _marker_variants(marker))
 _WECHAT_NOISE_LINES = {item for marker in _WECHAT_NOISE_LINES_RAW for item in _marker_variants(marker)}
 _WECHAT_NOISE_PREFIXES = tuple(item for marker in _WECHAT_NOISE_PREFIXES_RAW for item in _marker_variants(marker))
@@ -95,6 +107,22 @@ def parse_html(
     block_records = _extract_html_block_records(body_html or html, title=title)
     if platform == "wechat":
         block_records = _trim_wechat_block_records(block_records, title=title)
+    elif platform == "xiaohongshu":
+        original_block_count = len(block_records)
+        block_records, xhs_denoise_stats = _trim_xiaohongshu_block_records(block_records)
+        xhs_denoise_stats["original_block_count"] = original_block_count
+        xhs_denoise_stats["retained_block_count"] = len(block_records)
+        logging.getLogger(__name__).debug(
+            "xiaohongshu denoise: removed %d blocks", xhs_denoise_stats["removed_count"]
+        )
+        try:
+            denoise_report_path = payload_path.parent / "denoise_report.json"
+            denoise_report_path.write_text(
+                json.dumps({"platform": "xiaohongshu", "denoise_stats": xhs_denoise_stats}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
     blocks = build_blocks_from_records(block_records, title=title) if block_records else build_text_blocks(body, title=title)
     attachments = build_attachment_inventory(payload_path.parent, capture_manifest)
     evidence_segments = build_evidence_segments(job_dir=payload_path.parent, blocks=blocks, attachments=attachments)
@@ -256,6 +284,40 @@ def _trim_wechat_block_records(records: list[dict[str, object]], *, title: str) 
             break
         cleaned.append(record)
     return cleaned
+
+
+def _trim_xiaohongshu_block_records(
+    records: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, int]]:
+    """Remove XHS platform noise. Returns (cleaned_records, stats)."""
+    cleaned: list[dict[str, object]] = []
+    stats: dict[str, int] = {"removed_count": 0, "hashtag_lines": 0, "interaction_lines": 0, "tail_truncated": 0}
+    interaction_streak = 0
+    for record in records:
+        text = clean_text(str(record.get("text") or "")).strip()
+        if not text:
+            continue
+        if _XHS_HASHTAG_RE.match(text):
+            stats["hashtag_lines"] += 1
+            stats["removed_count"] += 1
+            continue
+        if text in _XHS_INTERACTION_KEYWORDS:
+            interaction_streak += 1
+            stats["interaction_lines"] += 1
+            stats["removed_count"] += 1
+            if interaction_streak >= _XHS_INTERACTION_TAIL_THRESHOLD:
+                stats["tail_truncated"] = 1
+                break
+            continue
+        interaction_streak = 0
+        emojis = _XHS_EMOJI_RE.findall(text)
+        if len(emojis) > 4:
+            positions = [m.start() for m in _XHS_EMOJI_RE.finditer(text)]
+            trimmed_text = text[:positions[4]].rstrip()
+            record = dict(record)
+            record["text"] = trimmed_text
+        cleaned.append(record)
+    return cleaned, stats
 
 
 def _trim_generic_shell_text(text: str, *, title: str) -> str:

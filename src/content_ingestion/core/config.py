@@ -30,6 +30,7 @@ class Settings:
     watcher_interval_seconds: int
     bilibili_whisper_model: str
     bilibili_whisper_language: str | None
+    llm_max_content_chars: int
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -100,11 +101,12 @@ def load_settings() -> Settings:
         openai_base_url=openai_base_url,
         analysis_model=analysis_model,
         multimodal_model=multimodal_model,
-        llm_max_evidence_segments=int(os.getenv("CONTENT_INGESTION_LLM_MAX_EVIDENCE_SEGMENTS", "100")),
+        llm_max_evidence_segments=int(os.getenv("CONTENT_INGESTION_LLM_MAX_EVIDENCE_SEGMENTS", "200")),
         whisper_timeout_seconds=int(os.getenv("CONTENT_INGESTION_WHISPER_TIMEOUT_SECONDS", "300")),
         watcher_interval_seconds=int(os.getenv("CONTENT_INGESTION_WATCHER_INTERVAL_SECONDS", "2")),
         bilibili_whisper_model=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_MODEL", "medium"),
         bilibili_whisper_language=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_LANGUAGE") or None,
+        llm_max_content_chars=int(os.getenv("CONTENT_INGESTION_LLM_MAX_CONTENT_CHARS", "40000")),
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.sessions_dir.mkdir(parents=True, exist_ok=True)

@@ -112,6 +112,12 @@ def build_text_analysis_envelope(
         output_schema_name=output_schema_name,
         input_modality=content_policy.text_analysis_input_modality,
     )
+    _selected_blocks, _blocks_truncated, _trimmed_block_count = _select_blocks_within_budget(
+        asset.blocks, settings.llm_max_content_chars
+    )
+    _selected_evidence = _select_evidence_within_budget(
+        asset.evidence_segments, settings.llm_max_evidence_segments
+    )
     return LlmRequestEnvelope(
         provider=settings.llm_provider,
         base_url=settings.openai_base_url,
@@ -125,8 +131,9 @@ def build_text_analysis_envelope(
             "title": asset.title,
             "author": asset.author,
             "published_at": asset.published_at.isoformat() if asset.published_at else None,
-            "content_text": asset.content_text,
-            "transcript_text": asset.transcript_text,
+            "content_text": _truncate_text(asset.content_text, settings.llm_max_content_chars),
+            "transcript_text": _truncate_text(asset.transcript_text, settings.llm_max_content_chars),
+            "transcript_truncated": bool(asset.transcript_text and len(asset.transcript_text) > settings.llm_max_content_chars),
             "blocks": [
                 {
                     "id": block.id,
@@ -135,8 +142,10 @@ def build_text_analysis_envelope(
                     "heading_level": block.heading_level,
                     "source": block.source,
                 }
-                for block in asset.blocks[:80]
+                for block in _selected_blocks
             ],
+            "content_truncated": _blocks_truncated,
+            "trimmed_block_count": _trimmed_block_count,
             "attachments": [
                 {
                     "id": attachment.id,
@@ -149,7 +158,7 @@ def build_text_analysis_envelope(
                 for attachment in asset.attachments[:40]
             ],
             "image_inputs": [_display_image_input_path(path) for path in image_paths],
-            "allowed_evidence_ids": [segment.id for segment in asset.evidence_segments[: settings.llm_max_evidence_segments]],
+            "allowed_evidence_ids": [segment.id for segment in _selected_evidence],
             "evidence_segments": [
                 {
                     "id": segment.id,
@@ -159,7 +168,7 @@ def build_text_analysis_envelope(
                     "end_ms": segment.end_ms,
                     "text": segment.text,
                 }
-                for segment in asset.evidence_segments[: settings.llm_max_evidence_segments]
+                for segment in _selected_evidence
             ],
         },
         image_paths=image_paths,
@@ -285,3 +294,276 @@ def _collect_llm_image_paths(asset: ContentAsset, *, job_dir: Path | None) -> li
         for attachment in asset.attachments
         if attachment.kind == "image" and attachment.role != "analysis_frame"
     ]
+
+def _truncate_text(text: str | None, max_chars: int) -> str | None:
+    """Truncate plain text to max_chars with head/tail coverage.
+
+    Keeps the first 60% and last 40% so opening and closing context both survive.
+    A visible marker is inserted at the cut point.
+    """
+    if not text or len(text) <= max_chars:
+        return text
+    head = int(max_chars * 0.6)
+    tail = max_chars - head
+    return text[:head] + "\n...[content truncated]...\n" + text[-tail:]
+
+
+def _select_blocks_within_budget(
+    blocks: list,
+    max_chars: int,
+) -> tuple[list, bool, int]:
+    """Select blocks within a strict char budget using type-aware priority.
+
+    Budget allocation:
+      - Headings: always kept first; count against budget.
+        If headings alone exceed budget, return only headings.
+      - High-priority (quote, list_item): up to 35% of post-heading budget,
+        selected proportionally across document positions.
+      - Normal paragraphs (len >= 20): remaining budget split head 40% / tail 40% / middle 20%.
+    Total selected chars is guaranteed to stay at or below max_chars (modulo integer rounding).
+    """
+    if not blocks:
+        return blocks, False, 0
+    total_chars = sum(len(b.text) for b in blocks)
+    if total_chars <= max_chars:
+        return blocks, False, 0
+
+    # Phase 1: headings — always kept, count against budget
+    selected: set[int] = set()
+    heading_chars = 0
+    for i, b in enumerate(blocks):
+        if b.kind == "heading":
+            selected.add(i)
+            heading_chars += len(b.text)
+
+    if heading_chars >= max_chars:
+        # Edge case: headings alone fill the budget
+        result = [blocks[i] for i in sorted(selected)]
+        return result, True, len(blocks) - len(result)
+
+    remaining = max_chars - heading_chars
+
+    # Phase 2: high-priority non-heading blocks (quote, list_item)
+    # Capped at 35% of remaining budget; selected with uniform step for coverage
+    hp_candidates = [(i, blocks[i]) for i in range(len(blocks))
+                     if i not in selected and blocks[i].kind in ("quote", "list_item")]
+    hp_budget = int(remaining * 0.35)
+    hp_used = 0
+    if hp_candidates and hp_budget > 0:
+        total_hp_chars = sum(len(b.text) for _, b in hp_candidates)
+        if total_hp_chars <= hp_budget:
+            for i, _ in hp_candidates:
+                selected.add(i)
+            hp_used = total_hp_chars
+        else:
+            # Uniform step across positions for coverage
+            avg_hp = max(1, total_hp_chars // len(hp_candidates))
+            step = max(1, len(hp_candidates) // max(1, hp_budget // avg_hp))
+            for idx in range(0, len(hp_candidates), step):
+                i, b = hp_candidates[idx]
+                if hp_used + len(b.text) <= hp_budget:
+                    selected.add(i)
+                    hp_used += len(b.text)
+
+    # Phase 3: normal paragraphs — head 40% / tail 40% / middle 20%
+    normal_budget = remaining - hp_used
+    head_budget = int(normal_budget * 0.4)
+    tail_budget = int(normal_budget * 0.4)
+    middle_budget = normal_budget - head_budget - tail_budget
+
+    filtered_normal = [
+        (i, blocks[i]) for i in range(len(blocks))
+        if i not in selected and blocks[i].kind not in ("heading", "quote", "list_item") and len(blocks[i].text) >= 20
+    ]
+
+    # Head
+    acc = 0
+    for i, b in filtered_normal:
+        if acc + len(b.text) > head_budget:
+            break
+        selected.add(i)
+        acc += len(b.text)
+
+    # Tail
+    acc = 0
+    for i, b in reversed(filtered_normal):
+        if i in selected:
+            continue
+        if acc + len(b.text) > tail_budget:
+            continue
+        selected.add(i)
+        acc += len(b.text)
+        if acc >= tail_budget:
+            break
+
+    # Middle uniform sampling — with strict budget guard per block
+    middle_candidates = [(i, b) for i, b in filtered_normal if i not in selected]
+    if middle_candidates and middle_budget > 0:
+        avg_len = max(1, sum(len(b.text) for _, b in middle_candidates) // len(middle_candidates))
+        step = max(1, len(middle_candidates) // max(1, middle_budget // avg_len))
+        middle_used = 0
+        for idx in range(0, len(middle_candidates), step):
+            i_m, b_m = middle_candidates[idx]
+            if middle_used + len(b_m.text) <= middle_budget:
+                selected.add(i_m)
+                middle_used += len(b_m.text)
+
+    result_blocks = [blocks[i] for i in sorted(selected)]
+    trimmed_count = len(blocks) - len(result_blocks)
+    return result_blocks, True, trimmed_count
+
+
+def _select_evidence_within_budget(
+    segments: list,
+    max_count: int,
+) -> list:
+    if len(segments) <= max_count:
+        return segments
+    head_count = max_count // 3
+    tail_count = max_count // 3
+    middle_count = max_count - head_count - tail_count
+    head = list(segments[:head_count])
+    tail_start = max(head_count, len(segments) - tail_count)
+    tail = list(segments[tail_start:])
+    middle_pool = segments[head_count:tail_start]
+    if middle_pool and middle_count > 0:
+        step = max(1, len(middle_pool) // middle_count)
+        middle = [middle_pool[i] for i in range(0, len(middle_pool), step)][:middle_count]
+    else:
+        middle = []
+    return head + middle + tail
+
+
+def build_reader_envelope(
+    *,
+    asset: ContentAsset,
+    job_dir: Path | None = None,
+    settings: Settings,
+    model: str,
+) -> LlmRequestEnvelope:
+    content_policy = resolve_content_policy(asset)
+    selected_blocks, blocks_truncated, trimmed_block_count = _select_blocks_within_budget(
+        asset.blocks, settings.llm_max_content_chars
+    )
+    task = LlmTaskSpec(
+        task_id="reader_pass_v1",
+        stage="structure_recognition",
+        goal="Identify document structure: chapter map, argument skeleton, content signals.",
+        output_schema_name="reader_analysis",
+        input_modality=content_policy.text_analysis_input_modality,
+    )
+    return LlmRequestEnvelope(
+        provider=settings.llm_provider,
+        base_url=settings.openai_base_url,
+        model=model,
+        task=task,
+        content_shape=asset.content_shape,
+        content_policy=content_policy,
+        source=_build_source_payload(asset),
+        task_intent="structure_recognition",
+        document={
+            "title": asset.title,
+            "content_text": _truncate_text(asset.content_text, settings.llm_max_content_chars),
+            "transcript_text": _truncate_text(asset.transcript_text, settings.llm_max_content_chars),
+            "transcript_truncated": bool(asset.transcript_text and len(asset.transcript_text) > settings.llm_max_content_chars),
+            "blocks": [
+                {
+                    "id": b.id,
+                    "kind": b.kind,
+                    "text": b.text,
+                    "heading_level": b.heading_level,
+                }
+                for b in selected_blocks
+            ],
+            "content_truncated": blocks_truncated,
+            "selected_block_count": len(selected_blocks),
+            "trimmed_block_count": trimmed_block_count,
+        },
+        image_paths=[],
+    )
+
+
+def build_synthesizer_envelope(
+    *,
+    asset: ContentAsset,
+    reader_output: dict[str, Any],
+    job_dir: Path | None = None,
+    settings: Settings,
+    model: str,
+    output_schema_name: str,
+) -> LlmRequestEnvelope:
+    content_policy = resolve_content_policy(asset)
+    image_paths = _collect_llm_image_paths(asset, job_dir=job_dir)
+    selected_blocks, blocks_truncated, trimmed_block_count = _select_blocks_within_budget(
+        asset.blocks, settings.llm_max_content_chars
+    )
+    selected_evidence = _select_evidence_within_budget(
+        asset.evidence_segments, settings.llm_max_evidence_segments
+    )
+    task = LlmTaskSpec(
+        task_id="synthesizer_pass_v1",
+        stage="deep_analysis",
+        goal="Based on reader structure, produce deep analysis, key points, verification, synthesis.",
+        output_schema_name=output_schema_name,
+        input_modality=content_policy.text_analysis_input_modality,
+    )
+    return LlmRequestEnvelope(
+        provider=settings.llm_provider,
+        base_url=settings.openai_base_url,
+        model=model,
+        task=task,
+        content_shape=asset.content_shape,
+        content_policy=content_policy,
+        source=_build_source_payload(asset),
+        task_intent=_task_intent(asset, content_policy),
+        document={
+            "title": asset.title,
+            "author": asset.author,
+            "published_at": asset.published_at.isoformat() if asset.published_at else None,
+            "content_text": _truncate_text(asset.content_text, settings.llm_max_content_chars),
+            "transcript_text": _truncate_text(asset.transcript_text, settings.llm_max_content_chars),
+            "transcript_truncated": bool(asset.transcript_text and len(asset.transcript_text) > settings.llm_max_content_chars),
+            "blocks": [
+                {
+                    "id": b.id,
+                    "kind": b.kind,
+                    "text": b.text,
+                    "heading_level": b.heading_level,
+                    "source": b.source,
+                }
+                for b in selected_blocks
+            ],
+            "content_truncated": blocks_truncated,
+            "selected_block_count": len(selected_blocks),
+            "trimmed_block_count": trimmed_block_count,
+            "selected_evidence_count": len(selected_evidence),
+            "total_evidence_count": len(asset.evidence_segments),
+            "attachments": [
+                {
+                    "id": a.id,
+                    "kind": a.kind,
+                    "role": a.role,
+                    "media_type": a.media_type,
+                    "path": a.path,
+                    "description": a.description,
+                }
+                for a in asset.attachments[:40]
+            ],
+            "image_inputs": [_display_image_input_path(p) for p in image_paths],
+            "allowed_evidence_ids": [s.id for s in selected_evidence],
+            "evidence_segments": [
+                {
+                    "id": s.id,
+                    "kind": s.kind,
+                    "source": s.source,
+                    "start_ms": s.start_ms,
+                    "end_ms": s.end_ms,
+                    "text": s.text,
+                }
+                for s in selected_evidence
+            ],
+            "reader_output": reader_output,
+        },
+        image_paths=image_paths,
+    )
+

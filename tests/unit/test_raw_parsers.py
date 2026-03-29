@@ -335,3 +335,100 @@ def test_parse_html_payload_builds_attachment_inventory_and_evidence_segments(tm
     )
 
     assert [segment.id for segment in asset.evidence_segments] == [segment.id for segment in asset_again.evidence_segments]
+
+
+def test_xiaohongshu_denoise_removes_hashtag_lines(tmp_path: Path) -> None:
+    from content_ingestion.raw.html_parser import _trim_xiaohongshu_block_records
+
+    records = [
+        {"text": "This is real content about the topic."},
+        {"text": "#hashtag1 #hashtag2 #hashtag3"},
+        {"text": "More real content here."},
+    ]
+    cleaned, stats = _trim_xiaohongshu_block_records(records)
+
+    assert len(cleaned) == 2
+    assert cleaned[0]["text"] == "This is real content about the topic."
+    assert cleaned[1]["text"] == "More real content here."
+    assert stats["hashtag_lines"] == 1
+    assert stats["removed_count"] == 1
+
+
+def test_xiaohongshu_denoise_removes_interaction_keywords_and_truncates(tmp_path: Path) -> None:
+    from content_ingestion.raw.html_parser import _trim_xiaohongshu_block_records
+
+    records = [
+        {"text": "Real content here."},
+        {"text": "姐妹们"},
+        {"text": "宝子们"},
+        {"text": "点个赞"},
+        {"text": "关注一下"},
+        {"text": "This should be cut off."},
+    ]
+    cleaned, stats = _trim_xiaohongshu_block_records(records)
+
+    assert len(cleaned) == 1
+    assert cleaned[0]["text"] == "Real content here."
+    assert stats["interaction_lines"] >= 4
+    assert stats["tail_truncated"] == 1
+
+
+def test_xiaohongshu_denoise_truncates_excess_emoji_but_keeps_line(tmp_path: Path) -> None:
+    from content_ingestion.raw.html_parser import _trim_xiaohongshu_block_records
+
+    records = [
+        {"text": "Good content 😀😀😀😀😀 emoji overload here"},
+    ]
+    cleaned, stats = _trim_xiaohongshu_block_records(records)
+
+    assert len(cleaned) == 1
+    # Line kept but emoji tail trimmed (first 4 emojis mark the truncation point)
+    assert "Good content" in cleaned[0]["text"]
+    assert "emoji overload here" not in cleaned[0]["text"]
+    assert stats["removed_count"] == 0
+
+
+def test_xiaohongshu_denoise_returns_correct_stats(tmp_path: Path) -> None:
+    from content_ingestion.raw.html_parser import _trim_xiaohongshu_block_records
+
+    records = [
+        {"text": "Normal content."},
+        {"text": "#tag1"},
+        {"text": "#tag2"},
+        {"text": "姐妹们"},
+    ]
+    cleaned, stats = _trim_xiaohongshu_block_records(records)
+
+    assert stats["removed_count"] == 3
+    assert stats["hashtag_lines"] == 2
+    assert stats["interaction_lines"] == 1
+
+
+def test_xiaohongshu_denoise_writes_artifact(tmp_path: Path) -> None:
+    import json
+    payload = tmp_path / "payload.html"
+    payload.write_text(
+        "<html><body><p>Real content about the topic.</p><p>#tag1 #tag2</p><p>姐妹们</p></body></html>",
+        encoding="utf-8",
+    )
+
+    asset = parse_payload(
+        payload,
+        {
+            "job_id": "job-xhs",
+            "source_url": "https://xiaohongshu.com/explore/abc",
+            "platform": "xiaohongshu",
+            "collector": "windows-client",
+            "collected_at": "2026-03-29T10:00:00+08:00",
+            "content_type": "html",
+        },
+    )
+
+    denoise_report = tmp_path / "denoise_report.json"
+    assert denoise_report.exists(), "denoise_report.json should be written for xiaohongshu"
+    report = json.loads(denoise_report.read_text(encoding="utf-8"))
+    assert report["platform"] == "xiaohongshu"
+    assert "denoise_stats" in report
+    assert report["denoise_stats"]["removed_count"] >= 2
+    assert report["denoise_stats"]["original_block_count"] >= 3
+    assert report["denoise_stats"]["retained_block_count"] < report["denoise_stats"]["original_block_count"]

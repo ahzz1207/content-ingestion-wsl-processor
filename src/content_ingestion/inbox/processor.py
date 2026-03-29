@@ -484,6 +484,8 @@ class JobProcessor:
             else {
                 "id": "synthesis-primary",
                 "final_answer": result.synthesis.final_answer,
+                "what_is_new": result.synthesis.what_is_new,
+                "tensions": result.synthesis.tensions,
                 "next_steps": result.synthesis.next_steps,
                 "open_questions": result.synthesis.open_questions,
                 "display": self._build_display_payload(
@@ -540,6 +542,17 @@ class JobProcessor:
             synthesis_payload=synthesis_payload,
             warnings=warnings_payload,
         )
+        chapter_map_payload = [
+            {
+                "id": ch.id,
+                "title": ch.title,
+                "role": ch.role,
+                "summary": ch.summary,
+                "block_ids": ch.block_ids,
+                "weight": ch.weight,
+            }
+            for ch in (result.chapter_map if hasattr(result, "chapter_map") else [])
+        ]
         return {
             "content_kind": result.content_kind,
             "author_stance": result.author_stance,
@@ -550,6 +563,7 @@ class JobProcessor:
             "verification_items": verification_items_payload,
             "synthesis": synthesis_payload,
             "warnings": warnings_payload,
+            "chapter_map": chapter_map_payload,
             "evidence_backlinks": evidence_backlinks,
             "result_index": result_index,
             "display_plan": self._build_display_plan(

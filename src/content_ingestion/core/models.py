@@ -71,6 +71,8 @@ class SynthesisResult:
     final_answer: str
     next_steps: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
+    what_is_new: str | None = None
+    tensions: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -95,6 +97,24 @@ class VisualFinding:
     evidence_frame_paths: list[str] = field(default_factory=list)
 
 
+
+@dataclass(slots=True)
+class ChapterEntry:
+    id: str
+    title: str
+    role: str  # setup|argument|evidence|counterpoint|conclusion|background
+    summary: str = ""  # 1-2句章节摘要
+    block_ids: list[str] = field(default_factory=list)
+    weight: str = "medium"  # high|medium|low
+
+
+@dataclass(slots=True)
+class ArgumentSkeletonItem:
+    id: str
+    claim: str
+    chapter_id: str
+    claim_type: str  # fact|interpretation|implication|rhetoric
+
 @dataclass(slots=True)
 class StructuredResult:
     content_kind: str | None = None
@@ -106,6 +126,7 @@ class StructuredResult:
     synthesis: SynthesisResult | None = None
     visual_findings: list[VisualFinding] = field(default_factory=list)
     warnings: list[WarningItem] = field(default_factory=list)
+    chapter_map: list[ChapterEntry] = field(default_factory=list)
 
 
 @dataclass(slots=True)

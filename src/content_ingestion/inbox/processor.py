@@ -104,7 +104,12 @@ class JobProcessor:
         artifact_count = len(capture_manifest.get("artifacts", [])) if capture_manifest else 0
         capture_validation = self._load_capture_validation_summary(target_dir, capture_manifest)
         media_processing = process_media_asset(job_dir=target_dir, asset=asset, settings=self.settings)
-        llm_analysis = analyze_asset(job_dir=target_dir, asset=asset, settings=self.settings)
+        llm_analysis = analyze_asset(
+            job_dir=target_dir,
+            asset=asset,
+            settings=self.settings,
+            requested_mode=str(metadata.get("requested_mode") or "auto"),
+        )
         asset.summary = llm_analysis.summary or asset.summary
         asset.structured_result = llm_analysis.structured_result
         asset.analysis_items = llm_analysis.analysis_items
@@ -275,6 +280,7 @@ class JobProcessor:
                 "wait_until",
                 "wait_for_selector",
                 "wait_for_selector_state",
+                "requested_mode",
                 "primary_payload_role",
                 "content_shape",
                 "capture_manifest_filename",
@@ -309,6 +315,9 @@ class JobProcessor:
             "multimodal_model": llm_analysis.multimodal_model,
             "schema_mode": llm_analysis.schema_mode,
             "content_policy_id": llm_analysis.content_policy_id,
+            "requested_mode": llm_analysis.requested_mode,
+            "resolved_mode": llm_analysis.resolved_mode,
+            "mode_confidence": llm_analysis.mode_confidence,
             "supported_input_modalities": llm_analysis.supported_input_modalities,
             "text_input_modality": llm_analysis.text_input_modality,
             "multimodal_input_modality": llm_analysis.multimodal_input_modality,
@@ -564,6 +573,7 @@ class JobProcessor:
             "synthesis": synthesis_payload,
             "warnings": warnings_payload,
             "chapter_map": chapter_map_payload,
+            "editorial": self._serialize_editorial_result(getattr(result, "editorial", None)),
             "evidence_backlinks": evidence_backlinks,
             "result_index": result_index,
             "display_plan": self._build_display_plan(
@@ -575,6 +585,291 @@ class JobProcessor:
                 warnings=warnings_payload,
             ),
         }
+
+    def _serialize_editorial_result(self, editorial) -> dict[str, Any] | None:
+        if editorial is None:
+            return None
+        base = editorial.base
+        base_payload = {
+            "core_summary": {
+                "value": base.core_summary,
+                "display": self._build_display_payload(
+                    kind="summary",
+                    priority=10,
+                    compact_text=base.core_summary,
+                    label="Core summary",
+                    tone="hero",
+                ),
+            },
+            "bottom_line": {
+                "value": base.bottom_line,
+                "display": self._build_display_payload(
+                    kind="bottom_line",
+                    priority=30,
+                    compact_text=base.bottom_line,
+                    label="Bottom line",
+                    tone="hero",
+                ),
+            },
+            "audience_fit": {
+                "value": base.audience_fit,
+                "display": self._build_display_payload(
+                    kind="audience_fit",
+                    priority=170,
+                    compact_text=base.audience_fit,
+                    label="Audience fit",
+                    tone="neutral",
+                ),
+            },
+            "save_worthy_points": [
+                {
+                    "value": item,
+                    "display": self._build_display_payload(
+                        kind="highlight",
+                        priority=110 + index,
+                        compact_text=item,
+                        label=f"Save-worthy {index}",
+                        tone="accent",
+                    ),
+                }
+                for index, item in enumerate(base.save_worthy_points, start=1)
+            ],
+        }
+        return {
+            "requested_mode": editorial.requested_mode,
+            "resolved_mode": editorial.resolved_mode,
+            "mode_confidence": editorial.mode_confidence,
+            "base": base_payload,
+            "mode_payload": self._serialize_editorial_mode_payload(
+                editorial.resolved_mode,
+                editorial.mode_payload,
+            ),
+        }
+
+    def _serialize_editorial_mode_payload(self, resolved_mode: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if resolved_mode == "guide":
+            return {
+                "guide_goal": self._editorial_display_value(
+                    value=str(payload.get("guide_goal") or ""),
+                    kind="meta",
+                    priority=20,
+                    label="Goal",
+                    tone="accent",
+                ),
+                "recommended_steps": self._editorial_display_list(
+                    values=payload.get("recommended_steps", []),
+                    kind="step",
+                    start_priority=100,
+                    label_prefix="Step",
+                    tone="accent",
+                ),
+                "tips": self._editorial_display_list(
+                    values=payload.get("tips", []),
+                    kind="tip",
+                    start_priority=180,
+                    label_prefix="Tip",
+                    tone="neutral",
+                ),
+                "pitfalls": self._editorial_display_list(
+                    values=payload.get("pitfalls", []),
+                    kind="pitfall",
+                    start_priority=220,
+                    label_prefix="Pitfall",
+                    tone="warning",
+                ),
+                "prerequisites": self._editorial_display_list(
+                    values=payload.get("prerequisites", []),
+                    kind="meta",
+                    start_priority=240,
+                    label_prefix="Prerequisite",
+                    tone="muted",
+                ),
+                "quick_win": self._editorial_display_value(
+                    value=str(payload.get("quick_win") or ""),
+                    kind="highlight",
+                    priority=140,
+                    label="Quick win",
+                    tone="accent",
+                ),
+            }
+        if resolved_mode == "review":
+            return {
+                "overall_judgment": self._editorial_display_value(
+                    value=str(payload.get("overall_judgment") or ""),
+                    kind="summary",
+                    priority=0,
+                    label="Overall judgment",
+                    tone="hero",
+                ),
+                "highlights": self._editorial_display_list(
+                    values=payload.get("highlights", []),
+                    kind="highlight",
+                    start_priority=110,
+                    label_prefix="Highlight",
+                    tone="accent",
+                ),
+                "style_and_mood": self._editorial_display_value(
+                    value=str(payload.get("style_and_mood") or ""),
+                    kind="meta",
+                    priority=150,
+                    label="Style and mood",
+                    tone="neutral",
+                ),
+                "what_stands_out": self._editorial_display_value(
+                    value=str(payload.get("what_stands_out") or ""),
+                    kind="highlight",
+                    priority=120,
+                    label="What stands out",
+                    tone="accent",
+                ),
+                "who_it_is_for": self._editorial_display_value(
+                    value=str(payload.get("who_it_is_for") or ""),
+                    kind="audience_fit",
+                    priority=170,
+                    label="Who it is for",
+                    tone="neutral",
+                ),
+                "reservation_points": self._editorial_display_list(
+                    values=payload.get("reservation_points", []),
+                    kind="reservation",
+                    start_priority=230,
+                    label_prefix="Reservation",
+                    tone="warning",
+                ),
+            }
+        return {
+            "author_thesis": self._editorial_display_value(
+                value=str(payload.get("author_thesis") or ""),
+                kind="thesis",
+                priority=10,
+                label="Author thesis",
+                tone="hero",
+            ),
+            "evidence_backed_points": self._serialize_editorial_argument_points(
+                payload.get("evidence_backed_points", []),
+                kind="evidence",
+                start_priority=110,
+                label_prefix="Evidence-backed",
+                tone="accent",
+            ),
+            "interpretive_points": self._serialize_editorial_argument_points(
+                payload.get("interpretive_points", []),
+                kind="key_point",
+                start_priority=130,
+                label_prefix="Interpretation",
+                tone="neutral",
+                statement_key="statement",
+            ),
+            "what_is_new": self._editorial_display_value(
+                value=str(payload.get("what_is_new") or ""),
+                kind="highlight",
+                priority=120,
+                label="What's new",
+                tone="accent",
+            ),
+            "tensions": self._editorial_display_list(
+                values=payload.get("tensions", []),
+                kind="tension",
+                start_priority=210,
+                label_prefix="Tension",
+                tone="warning",
+            ),
+            "uncertainties": self._editorial_display_list(
+                values=payload.get("uncertainties", []),
+                kind="meta",
+                start_priority=240,
+                label_prefix="Uncertainty",
+                tone="muted",
+            ),
+            "verification_items": [
+                {
+                    **item,
+                    "display": self._build_display_payload(
+                        kind="evidence",
+                        priority=250 + index,
+                        compact_text=f'{item.get("claim", "")} [{item.get("status", "")}]',
+                        label=f'Verification {index}',
+                        tone=self._verification_tone(str(item.get("status") or "unclear")),
+                    ),
+                }
+                for index, item in enumerate(payload.get("verification_items", []), start=1)
+            ],
+        }
+
+    def _serialize_editorial_argument_points(
+        self,
+        values: list[dict[str, Any]],
+        *,
+        kind: str,
+        start_priority: int,
+        label_prefix: str,
+        tone: str,
+        statement_key: str = "details",
+    ) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        for index, item in enumerate(values, start=1):
+            compact_text = str(item.get(statement_key) or item.get("title") or item.get("statement") or "").strip()
+            payload = dict(item)
+            payload["display"] = self._build_display_payload(
+                kind=kind,
+                priority=start_priority + index,
+                compact_text=compact_text,
+                label=f"{label_prefix} {index}",
+                tone=tone,
+            )
+            serialized.append(payload)
+        return serialized
+
+    def _editorial_display_value(
+        self,
+        *,
+        value: str,
+        kind: str,
+        priority: int,
+        label: str,
+        tone: str,
+    ) -> dict[str, Any] | None:
+        normalized = value.strip()
+        if not normalized:
+            return None
+        return {
+            "value": normalized,
+            "display": self._build_display_payload(
+                kind=kind,
+                priority=priority,
+                compact_text=normalized,
+                label=label,
+                tone=tone,
+            ),
+        }
+
+    def _editorial_display_list(
+        self,
+        *,
+        values: list[Any],
+        kind: str,
+        start_priority: int,
+        label_prefix: str,
+        tone: str,
+    ) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for index, raw in enumerate(values, start=1):
+            value = str(raw).strip()
+            if not value:
+                continue
+            items.append(
+                {
+                    "value": value,
+                    "display": self._build_display_payload(
+                        kind=kind,
+                        priority=start_priority + index,
+                        compact_text=value,
+                        label=f"{label_prefix} {index}",
+                        tone=tone,
+                    ),
+                }
+            )
+        return items
 
     def _build_evidence_index(self, segments) -> dict[str, Any]:
         return {

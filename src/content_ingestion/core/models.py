@@ -115,6 +115,24 @@ class ArgumentSkeletonItem:
     chapter_id: str
     claim_type: str  # fact|interpretation|implication|rhetoric
 
+
+@dataclass(slots=True)
+class EditorialBase:
+    core_summary: str
+    bottom_line: str
+    audience_fit: str
+    save_worthy_points: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class EditorialResult:
+    requested_mode: str
+    resolved_mode: str
+    mode_confidence: float
+    base: EditorialBase
+    mode_payload: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class StructuredResult:
     content_kind: str | None = None
@@ -127,6 +145,7 @@ class StructuredResult:
     visual_findings: list[VisualFinding] = field(default_factory=list)
     warnings: list[WarningItem] = field(default_factory=list)
     chapter_map: list[ChapterEntry] = field(default_factory=list)
+    editorial: EditorialResult | None = None
 
 
 @dataclass(slots=True)

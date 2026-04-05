@@ -130,6 +130,13 @@ class EditorialResult:
     resolved_mode: str
     mode_confidence: float
     base: EditorialBase
+    requested_reading_goal: str | None = None
+    resolved_reading_goal: str | None = None
+    goal_confidence: float | None = None
+    requested_domain_template: str | None = None
+    resolved_domain_template: str | None = None
+    domain_confidence: float | None = None
+    route_key: str | None = None
     mode_payload: dict[str, Any] = field(default_factory=dict)
 
 

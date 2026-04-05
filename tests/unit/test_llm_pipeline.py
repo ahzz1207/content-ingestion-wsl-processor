@@ -44,8 +44,10 @@ class _FakeResponses:
                     "has_data": False,
                     "estimated_depth": "medium",
                 },
-                "suggested_mode": "argument",
-                "mode_confidence": 0.82,
+                "suggested_reading_goal": "argument",
+                "goal_confidence": 0.82,
+                "suggested_domain_template": "generic",
+                "domain_confidence": 0.82,
             }
         elif schema_name == "content_analysis":
             payload = {
@@ -208,6 +210,20 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert result.structured_result.synthesis.what_is_new == "Novel perspective on the topic"
     assert result.structured_result.synthesis.tensions == ["Tension between claim A and claim B"]
     assert result.structured_result.chapter_map[0].id == "ch-1"
+    assert result.requested_reading_goal == "auto"
+    assert result.resolved_reading_goal == "argument"
+    assert result.goal_confidence == 0.82
+    assert result.requested_domain_template is None
+    assert result.resolved_domain_template == "generic"
+    assert result.domain_confidence == 0.82
+    assert result.route_key == "argument.generic"
+    assert result.structured_result.editorial is not None
+    assert result.structured_result.editorial.requested_reading_goal == "auto"
+    assert result.structured_result.editorial.resolved_reading_goal == "argument"
+    assert result.structured_result.editorial.goal_confidence == 0.82
+    assert result.structured_result.editorial.resolved_domain_template == "generic"
+    assert result.structured_result.editorial.domain_confidence == 0.82
+    assert result.structured_result.editorial.route_key == "argument.generic"
     assert result.reader_result_path == "analysis/llm/reader_result.json"
     assert result.synthesizer_result_path == "analysis/llm/synthesizer_result.json"
     assert (job_dir / "analysis" / "llm" / "reader_result.json").exists()
@@ -215,9 +231,22 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     analysis_result_payload = json.loads((job_dir / "analysis" / "llm" / "analysis_result.json").read_text(encoding="utf-8"))
     assert analysis_result_payload["reader_result_path"] == "analysis/llm/reader_result.json"
     assert analysis_result_payload["synthesizer_result_path"] == "analysis/llm/synthesizer_result.json"
+    assert analysis_result_payload["requested_reading_goal"] == "auto"
+    assert analysis_result_payload["resolved_reading_goal"] == "argument"
+    assert analysis_result_payload["goal_confidence"] == 0.82
+    assert analysis_result_payload["requested_domain_template"] is None
+    assert analysis_result_payload["resolved_domain_template"] == "generic"
+    assert analysis_result_payload["domain_confidence"] == 0.82
+    assert analysis_result_payload["route_key"] == "argument.generic"
     assert analysis_result_payload["result"]["chapter_map"][0]["id"] == "ch-1"
     assert analysis_result_payload["result"]["synthesis"]["what_is_new"] == "Novel perspective on the topic"
     assert analysis_result_payload["result"]["synthesis"]["tensions"] == ["Tension between claim A and claim B"]
+    assert analysis_result_payload["result"]["editorial"]["requested_reading_goal"] == "auto"
+    assert analysis_result_payload["result"]["editorial"]["resolved_reading_goal"] == "argument"
+    assert analysis_result_payload["result"]["editorial"]["goal_confidence"] == 0.82
+    assert analysis_result_payload["result"]["editorial"]["resolved_domain_template"] == "generic"
+    assert analysis_result_payload["result"]["editorial"]["domain_confidence"] == 0.82
+    assert analysis_result_payload["result"]["editorial"]["route_key"] == "argument.generic"
 
 
 def test_analyze_asset_skips_without_api_key(monkeypatch, tmp_path: Path) -> None:
@@ -244,44 +273,204 @@ def test_analyze_asset_skips_without_api_key(monkeypatch, tmp_path: Path) -> Non
     assert result.warnings
 
 
-def test_reader_schema_has_v1_mode_fields() -> None:
+def test_reader_schema_has_routing_v2_fields() -> None:
     from content_ingestion.pipeline.llm_pipeline import READER_SCHEMA
 
     props = READER_SCHEMA["properties"]
-    assert "suggested_mode" in props
-    assert props["suggested_mode"]["type"] == "string"
-    assert set(props["suggested_mode"]["enum"]) == {"argument", "guide", "review"}
-    assert "mode_confidence" in props
-    assert props["mode_confidence"]["type"] == "number"
-    assert "suggested_mode" in READER_SCHEMA["required"]
-    assert "mode_confidence" in READER_SCHEMA["required"]
+    assert "suggested_reading_goal" in props
+    assert props["suggested_reading_goal"]["type"] == "string"
+    assert set(props["suggested_reading_goal"]["enum"]) == {"argument", "guide", "review", "narrative"}
+    assert "suggested_domain_template" in props
+    assert props["suggested_domain_template"]["type"] == "string"
+    assert set(props["suggested_domain_template"]["enum"]) == {
+        "politics_public_issue",
+        "macro_business",
+        "game_guide",
+        "personal_narrative",
+        "generic",
+    }
+    assert "domain_confidence" in props
+    assert props["domain_confidence"]["type"] == "number"
+    assert "goal_confidence" in props
+    assert props["goal_confidence"]["type"] == "number"
+    assert "suggested_reading_goal" in READER_SCHEMA["required"]
+    assert "suggested_domain_template" in READER_SCHEMA["required"]
+    assert "domain_confidence" in READER_SCHEMA["required"]
+    assert "goal_confidence" in READER_SCHEMA["required"]
 
 
-def test_resolve_mode_honors_explicit_request() -> None:
-    from content_ingestion.pipeline.llm_pipeline import _resolve_mode
+def test_resolve_routing_honors_explicit_reading_goal_override() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
 
-    mode, confidence = _resolve_mode("guide", {"suggested_mode": "argument", "mode_confidence": 0.9})
+    route = _resolve_routing(
+        requested_reading_goal="guide",
+        requested_domain_template=None,
+        reader_payload={
+            "suggested_reading_goal": "review",
+            "suggested_domain_template": "macro_business",
+            "goal_confidence": 0.73,
+            "domain_confidence": 0.91,
+        },
+    )
 
-    assert mode == "guide"
-    assert confidence == 1.0
+    assert route.reading_goal == "guide"
+    assert route.domain_template == "generic"
+    assert route.route_key == "guide.generic"
+    assert route.goal_confidence == 1.0
 
 
-def test_resolve_mode_uses_reader_suggestion_for_auto() -> None:
-    from content_ingestion.pipeline.llm_pipeline import _resolve_mode
+def test_resolve_routing_honors_explicit_domain_override_when_provided() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
 
-    mode, confidence = _resolve_mode("auto", {"suggested_mode": "review", "mode_confidence": 0.75})
+    route = _resolve_routing(
+        requested_reading_goal="auto",
+        requested_domain_template="macro_business",
+        reader_payload={
+            "suggested_reading_goal": "argument",
+            "suggested_domain_template": "generic",
+            "goal_confidence": 0.66,
+            "domain_confidence": 0.4,
+        },
+    )
 
-    assert mode == "review"
-    assert confidence == 0.75
+    assert route.reading_goal == "argument"
+    assert route.domain_template == "macro_business"
+    assert route.route_key == "argument.macro_business"
 
 
-def test_resolve_mode_falls_back_to_argument_for_invalid_mode() -> None:
-    from content_ingestion.pipeline.llm_pipeline import _resolve_mode
+def test_resolve_routing_uses_reader_suggestion_for_auto_goal() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
 
-    mode, confidence = _resolve_mode("auto", {"suggested_mode": "informational", "mode_confidence": 0.92})
+    route = _resolve_routing(
+        requested_reading_goal="auto",
+        requested_domain_template=None,
+        reader_payload={
+            "suggested_reading_goal": "review",
+            "suggested_domain_template": "generic",
+            "goal_confidence": 0.88,
+            "domain_confidence": 0.88,
+        },
+    )
 
-    assert mode == "argument"
-    assert confidence == 0.5
+    assert route.reading_goal == "review"
+    assert route.domain_template == "generic"
+    assert route.route_key == "review.generic"
+    assert route.goal_confidence == 0.88
+
+
+def test_resolve_routing_falls_back_to_legacy_v1_reader_keys() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_reading_goal="auto",
+        requested_domain_template=None,
+        reader_payload={
+            "suggested_mode": "guide",
+            "mode_confidence": 0.64,
+        },
+    )
+
+    assert route.reading_goal == "guide"
+    assert route.goal_confidence == 0.64
+    assert route.domain_template == "generic"
+    assert route.route_key == "guide.generic"
+
+
+def test_resolve_routing_preserves_explicit_zero_confidence() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_reading_goal="auto",
+        requested_domain_template=None,
+        reader_payload={
+            "suggested_reading_goal": "review",
+            "suggested_domain_template": "macro_business",
+            "goal_confidence": 0.0,
+            "domain_confidence": 0.0,
+        },
+    )
+
+    assert route.reading_goal == "review"
+    assert route.goal_confidence == 0.0
+    assert route.domain_confidence == 0.0
+    assert route.domain_template == "generic"
+    assert route.route_key == "review.generic"
+
+
+def test_resolve_routing_falls_back_to_argument_when_goal_invalid() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_reading_goal="auto",
+        requested_domain_template=None,
+        reader_payload={
+            "suggested_reading_goal": "informational",
+            "suggested_domain_template": "macro_business",
+            "goal_confidence": 0.93,
+            "domain_confidence": 0.93,
+        },
+    )
+
+    assert route.reading_goal == "argument"
+    assert route.domain_template == "macro_business"
+    assert route.route_key == "argument.macro_business"
+    assert route.goal_confidence == 0.5
+
+
+def test_resolve_routing_falls_back_to_generic_for_low_domain_confidence() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_reading_goal="auto",
+        requested_domain_template=None,
+        reader_payload={
+            "suggested_reading_goal": "argument",
+            "suggested_domain_template": "macro_business",
+            "goal_confidence": 0.71,
+            "domain_confidence": 0.2,
+        },
+    )
+
+    assert route.reading_goal == "argument"
+    assert route.domain_template == "generic"
+    assert route.route_key == "argument.generic"
+
+
+def test_resolve_routing_falls_back_to_goal_generic_for_unsupported_combo() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_reading_goal="review",
+        requested_domain_template="macro_business",
+        reader_payload={
+            "suggested_reading_goal": "review",
+            "suggested_domain_template": "macro_business",
+            "goal_confidence": 0.97,
+            "domain_confidence": 0.97,
+        },
+    )
+
+    assert route.reading_goal == "review"
+    assert route.domain_template == "generic"
+    assert route.route_key == "review.generic"
+
+
+def test_resolve_routing_uses_requested_mode_as_compatibility_bridge() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_mode="guide",
+        reader_payload={
+            "suggested_reading_goal": "argument",
+            "suggested_domain_template": "game_guide",
+            "goal_confidence": 0.94,
+            "domain_confidence": 0.94,
+        },
+    )
+
+    assert route.reading_goal == "guide"
+    assert route.domain_template == "game_guide"
+    assert route.route_key == "guide.game_guide"
 
 
 def test_editorial_result_dataclasses_exist() -> None:
@@ -434,8 +623,10 @@ def test_analyze_asset_cleans_invalid_evidence_references(monkeypatch, tmp_path:
                         "has_data": False,
                         "estimated_depth": "medium",
                     },
-                    "suggested_mode": "argument",
-                    "mode_confidence": 0.6,
+                    "suggested_reading_goal": "argument",
+                    "goal_confidence": 0.6,
+                    "suggested_domain_template": "generic",
+                    "domain_confidence": 0.6,
                 }
             else:
                 payload = {
@@ -535,8 +726,10 @@ def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path
                         "has_data": False,
                         "estimated_depth": "medium",
                     },
-                    "suggested_mode": "argument",
-                    "mode_confidence": 0.6,
+                    "suggested_reading_goal": "argument",
+                    "goal_confidence": 0.6,
+                    "suggested_domain_template": "generic",
+                    "domain_confidence": 0.6,
                 }
             elif self.call_count == 2:
                 payload = {
@@ -784,8 +977,10 @@ def test_analyze_asset_repair_preserves_chapter_map(monkeypatch, tmp_path: Path)
                         "has_data": False,
                         "estimated_depth": "medium",
                     },
-                    "suggested_mode": "argument",
-                    "mode_confidence": 0.7,
+                    "suggested_reading_goal": "argument",
+                    "goal_confidence": 0.7,
+                    "suggested_domain_template": "generic",
+                    "domain_confidence": 0.7,
                 }
             elif self.call_count == 2:
                 # First synthesizer call — invalid evidence

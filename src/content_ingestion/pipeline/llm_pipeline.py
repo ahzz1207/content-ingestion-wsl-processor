@@ -209,8 +209,13 @@ READER_SCHEMA = {
             },
             "required": ["evidence_density", "rhetoric_density", "has_novel_claim", "has_data", "estimated_depth"],
         },
-        "suggested_mode": {"type": "string", "enum": ["argument", "guide", "review"]},
-        "mode_confidence": {"type": "number"},
+        "suggested_reading_goal": {"type": "string", "enum": ["argument", "guide", "review", "narrative"]},
+        "goal_confidence": {"type": "number"},
+        "suggested_domain_template": {
+            "type": "string",
+            "enum": ["politics_public_issue", "macro_business", "game_guide", "personal_narrative", "generic"],
+        },
+        "domain_confidence": {"type": "number"},
     },
     "required": [
         "document_type",
@@ -218,8 +223,10 @@ READER_SCHEMA = {
         "chapter_map",
         "argument_skeleton",
         "content_signals",
-        "suggested_mode",
-        "mode_confidence",
+        "suggested_reading_goal",
+        "goal_confidence",
+        "suggested_domain_template",
+        "domain_confidence",
     ],
 }
 
@@ -291,15 +298,42 @@ class LlmAnalysisResult:
     requested_mode: str = "auto"
     resolved_mode: str | None = None
     mode_confidence: float | None = None
+    requested_reading_goal: str | None = None
+    resolved_reading_goal: str | None = None
+    goal_confidence: float | None = None
+    requested_domain_template: str | None = None
+    resolved_domain_template: str | None = None
+    domain_confidence: float | None = None
+    route_key: str | None = None
     request_artifacts: dict[str, str] = field(default_factory=dict)
 
 
 _VALID_V1_MODES = {"argument", "guide", "review"}
+_VALID_READING_GOALS = {"argument", "guide", "review", "narrative"}
+_VALID_DOMAIN_TEMPLATES = {"politics_public_issue", "macro_business", "game_guide", "personal_narrative", "generic"}
+_DOMAIN_CONFIDENCE_THRESHOLD = 0.5
+_SUPPORTED_ROUTE_TEMPLATES = {
+    "argument": {"politics_public_issue", "macro_business", "generic"},
+    "guide": {"game_guide", "generic"},
+    "review": {"generic"},
+    "narrative": {"personal_narrative", "generic"},
+}
 _MODE_SCHEMA = {
     "argument": ARGUMENT_ANALYSIS_SCHEMA,
     "guide": GUIDE_ANALYSIS_SCHEMA,
     "review": REVIEW_ANALYSIS_SCHEMA,
 }
+
+
+@dataclass(slots=True)
+class RoutingDecision:
+    reading_goal: str
+    domain_template: str
+    route_key: str
+    goal_confidence: float
+    domain_confidence: float
+    requested_reading_goal: str
+    requested_domain_template: str | None
 
 
 def analyze_asset(
@@ -397,15 +431,24 @@ def analyze_asset(
     )
     result.reader_result_path = reader_result_path.relative_to(job_dir).as_posix()
     result.steps.append({"name": "llm_reader_pass", "status": "success", "details": settings.analysis_model})
-    resolved_mode, mode_confidence = _resolve_mode(requested_mode, reader_payload)
+    routing = _resolve_routing(requested_mode=requested_mode, reader_payload=reader_payload)
+    resolved_mode = _reading_goal_to_mode(routing.reading_goal)
+    mode_confidence = routing.goal_confidence
     result.requested_mode = requested_mode
     result.resolved_mode = resolved_mode
     result.mode_confidence = mode_confidence
+    result.requested_reading_goal = routing.requested_reading_goal
+    result.resolved_reading_goal = routing.reading_goal
+    result.goal_confidence = routing.goal_confidence
+    result.requested_domain_template = routing.requested_domain_template
+    result.resolved_domain_template = routing.domain_template
+    result.domain_confidence = routing.domain_confidence
+    result.route_key = routing.route_key
     result.steps.append(
         {
             "name": "mode_routing",
             "status": "success",
-            "details": f"{requested_mode} -> {resolved_mode} ({mode_confidence:.2f})",
+            "details": f"{routing.requested_reading_goal} -> {routing.route_key} ({routing.goal_confidence:.2f}/{routing.domain_confidence:.2f})",
         }
     )
 
@@ -577,6 +620,13 @@ def analyze_asset(
                 "requested_mode": result.requested_mode,
                 "resolved_mode": result.resolved_mode,
                 "mode_confidence": result.mode_confidence,
+                "requested_reading_goal": result.requested_reading_goal,
+                "resolved_reading_goal": result.resolved_reading_goal,
+                "goal_confidence": result.goal_confidence,
+                "requested_domain_template": result.requested_domain_template,
+                "resolved_domain_template": result.resolved_domain_template,
+                "domain_confidence": result.domain_confidence,
+                "route_key": result.route_key,
                 "reader_result_path": result.reader_result_path,
                 "synthesizer_result_path": result.synthesizer_result_path,
                 "request_artifacts": result.request_artifacts,
@@ -772,18 +822,60 @@ GENERAL RULES
 - All analysis_items must have kind equal to "implication" or "alternative". No other values are valid."""
 
 
-def _resolve_mode(requested_mode: str, reader_payload: dict[str, object]) -> tuple[str, float]:
-    if requested_mode in _VALID_V1_MODES:
-        return requested_mode, 1.0
-    suggested = str(reader_payload.get("suggested_mode") or "").strip()
-    confidence = float(reader_payload.get("mode_confidence") or 0.5)
-    if suggested in _VALID_V1_MODES:
-        return suggested, confidence
-    return "argument", 0.5
+def _resolve_routing(
+    requested_reading_goal: str | None = None,
+    requested_domain_template: str | None = None,
+    reader_payload: dict[str, object] | None = None,
+    requested_mode: str | None = None,
+) -> RoutingDecision:
+    payload = reader_payload or {}
+    effective_requested_goal = str(requested_reading_goal or requested_mode or "auto").strip() or "auto"
+    if effective_requested_goal in _VALID_READING_GOALS:
+        reading_goal = effective_requested_goal
+        goal_confidence = 1.0
+    else:
+        suggested_goal = str(payload.get("suggested_reading_goal") or "").strip()
+        if suggested_goal in _VALID_READING_GOALS:
+            reading_goal = suggested_goal
+            goal_confidence = _coerce_confidence(payload.get("goal_confidence")) or 0.5
+        else:
+            reading_goal = "argument"
+            goal_confidence = 0.5
+
+    if requested_domain_template is not None:
+        candidate_domain = str(requested_domain_template).strip() or "generic"
+        domain_confidence = 1.0
+    else:
+        suggested_domain = str(payload.get("suggested_domain_template") or "").strip()
+        candidate_domain = suggested_domain if suggested_domain in _VALID_DOMAIN_TEMPLATES else "generic"
+        domain_confidence = _coerce_confidence(payload.get("domain_confidence")) or 0.0
+        if domain_confidence < _DOMAIN_CONFIDENCE_THRESHOLD:
+            candidate_domain = "generic"
+
+    if candidate_domain not in _VALID_DOMAIN_TEMPLATES:
+        candidate_domain = "generic"
+
+    supported_templates = _SUPPORTED_ROUTE_TEMPLATES.get(reading_goal, {"generic"})
+    domain_template = candidate_domain if candidate_domain in supported_templates else "generic"
+    return RoutingDecision(
+        reading_goal=reading_goal,
+        domain_template=domain_template,
+        route_key=f"{reading_goal}.{domain_template}",
+        goal_confidence=goal_confidence,
+        domain_confidence=domain_confidence,
+        requested_reading_goal=effective_requested_goal,
+        requested_domain_template=requested_domain_template,
+    )
+
+
+def _reading_goal_to_mode(reading_goal: str) -> str:
+    if reading_goal in _VALID_V1_MODES:
+        return reading_goal
+    return "argument"
 
 
 def _reader_instructions() -> str:
-    return """You are a structural analyst. Your only job is to identify the shape of the content and suggest the best reading mode.
+    return """You are a structural analyst. Your only job is to identify the shape of the content and suggest the best routing.
 
 DO NOT extract opinions, write summaries, or make quality judgments.
 
@@ -798,11 +890,11 @@ YOUR TASKS:
 4. ARGUMENT SKELETON - For each chapter, state the main claim.
    - claim_type: fact / interpretation / implication / rhetoric.
 5. CONTENT SIGNALS - Signal properties to guide downstream analysis.
-6. MODE SUGGESTION - Choose the best v1 analysis mode:
-   - argument: commentary, issue analysis, debate, opinion, macro reading
-   - guide: tutorial, walkthrough, advice, how-to, practical instructions
-   - review: recommendation, curation, taste judgment, exhibition/album/product review
-   Set mode_confidence between 0.0 and 1.0.
+6. ROUTING SUGGESTION - Choose the best reading goal and domain template:
+   - suggested_reading_goal: argument / guide / review / narrative
+   - suggested_domain_template: politics_public_issue / macro_business / game_guide / personal_narrative / generic
+   - goal_confidence: confidence in the reading goal, between 0.0 and 1.0
+   - domain_confidence: confidence in the domain template, between 0.0 and 1.0
 """
 
 
@@ -959,6 +1051,7 @@ def _build_structured_result(
         save_worthy_points=[str(item).strip() for item in payload.get("save_worthy_points", []) if str(item).strip()],
     )
     mode_payload = _build_editorial_mode_payload(resolved_mode, payload)
+    routing = _resolve_routing(requested_mode=requested_mode, reader_payload=reader_payload)
     return StructuredResult(
         content_kind=content_kind,
         author_stance=author_stance,
@@ -973,6 +1066,13 @@ def _build_structured_result(
             resolved_mode=resolved_mode,
             mode_confidence=mode_confidence if mode_confidence is not None else 0.0,
             base=editorial_base,
+            requested_reading_goal=routing.requested_reading_goal,
+            resolved_reading_goal=routing.reading_goal,
+            goal_confidence=routing.goal_confidence,
+            requested_domain_template=routing.requested_domain_template,
+            resolved_domain_template=routing.domain_template,
+            domain_confidence=routing.domain_confidence,
+            route_key=routing.route_key,
             mode_payload=mode_payload,
         ),
     )
@@ -1278,6 +1378,13 @@ def _serialize_editorial_result(editorial: EditorialResult | None) -> dict[str, 
         "requested_mode": editorial.requested_mode,
         "resolved_mode": editorial.resolved_mode,
         "mode_confidence": editorial.mode_confidence,
+        "requested_reading_goal": editorial.requested_reading_goal,
+        "resolved_reading_goal": editorial.resolved_reading_goal,
+        "goal_confidence": editorial.goal_confidence,
+        "requested_domain_template": editorial.requested_domain_template,
+        "resolved_domain_template": editorial.resolved_domain_template,
+        "domain_confidence": editorial.domain_confidence,
+        "route_key": editorial.route_key,
         "base": {
             "core_summary": editorial.base.core_summary,
             "bottom_line": editorial.base.bottom_line,

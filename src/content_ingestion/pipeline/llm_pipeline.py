@@ -15,6 +15,8 @@ from content_ingestion.core.models import (
     EditorialBase,
     EditorialResult,
     KeyPoint,
+    ProductSection,
+    ProductView,
     RelatedRef,
     ResultSummary,
     StructuredResult,
@@ -323,6 +325,13 @@ _MODE_SCHEMA = {
     "guide": GUIDE_ANALYSIS_SCHEMA,
     "review": REVIEW_ANALYSIS_SCHEMA,
 }
+_PRODUCT_VIEW_LAYOUTS = {
+    "argument.politics_public_issue": "analysis_brief",
+    "argument.macro_business": "analysis_brief",
+    "guide.game_guide": "practical_guide",
+    "narrative.personal_narrative": "narrative_digest",
+    "review.generic": "review_curation",
+}
 
 
 @dataclass(slots=True)
@@ -470,7 +479,7 @@ def analyze_asset(
     text_payload = _call_structured_response(
         client=client,
         model=settings.analysis_model,
-        instructions=_synthesizer_instructions_for_mode(resolved_mode),
+        instructions=_synthesizer_instructions_for_mode(resolved_mode, routing.route_key),
         input_payload=synthesizer_envelope.to_model_input(),
         schema_name="content_analysis",
         schema=_MODE_SCHEMA.get(resolved_mode, ARGUMENT_ANALYSIS_SCHEMA),
@@ -936,6 +945,63 @@ Rules:
 - Keep interpretive points separate from evidence-backed points."""
 
 
+def _synthesizer_instructions_politics_public_issue() -> str:
+    return """You are a critical analyst producing an argument-focused result for a public issue or politics piece.
+Use the Reader output to organize the synthesis around the author's case, the public stakes, and the missing tradeoffs.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- author_thesis
+- evidence_backed_points
+- interpretive_points
+- what_is_new
+- tensions
+- uncertainties
+- verification_items
+
+Rules:
+- evidence_backed_points should surface the strongest policy claims, evidence, and institutional constraints.
+- interpretive_points should focus on downstream implications, counter-pressures, or unaddressed alternatives.
+- verification_items should prioritize claims about outcomes, costs, timing, and scope.
+- tensions should emphasize tradeoffs, internal contradictions, or evidence-to-conclusion gaps.
+- Use only evidence_segment_ids from the evidence_segments list.
+- Do not invent evidence ids."""
+
+
+def _synthesizer_instructions_macro_business() -> str:
+    return """You are a critical analyst producing an argument-focused result for a macro business or macroeconomic piece.
+Use the Reader output to organize the synthesis around the cycle, causal logic, and the indicators that matter most.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- author_thesis
+- evidence_backed_points
+- interpretive_points
+- what_is_new
+- tensions
+- uncertainties
+- verification_items
+
+Rules:
+- evidence_backed_points should center on indicators, causal claims, and timing arguments.
+- interpretive_points should focus on second-order implications, alternative cycle readings, or market consequences.
+- verification_items should prioritize claims about macro direction, timing, policy response, and business impact.
+- tensions should capture where indicators, confidence, or conclusions do not line up cleanly.
+- uncertainties should call out what would change the macro read.
+- Use only evidence_segment_ids from the evidence_segments list.
+- Do not invent evidence ids."""
+
+
 def _synthesizer_instructions_guide() -> str:
     return """You are an editor producing a practical guide-oriented result.
 Focus on usability, sequence, and practical value.
@@ -953,6 +1019,32 @@ Required fields:
 - pitfalls
 - prerequisites
 - quick_win"""
+
+
+def _synthesizer_instructions_game_guide() -> str:
+    return """You are an editor producing a practical game-guide result.
+Focus on what helps a player act: route order, build choices, prerequisites, quick wins, and avoidable mistakes.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- guide_goal
+- recommended_steps
+- tips
+- pitfalls
+- prerequisites
+- quick_win
+
+Rules:
+- recommended_steps should be concrete actions a player can follow in sequence.
+- tips should highlight efficiency, survivability, shortcuts, or build advantages.
+- pitfalls should warn about dead ends, wasted resources, or common player mistakes.
+- prerequisites should note unlocks, gear, level gates, or setup the player needs first.
+- quick_win should give the fastest meaningful payoff for a player starting now."""
 
 
 def _synthesizer_instructions_review() -> str:
@@ -974,7 +1066,41 @@ Required fields:
 - reservation_points"""
 
 
-def _synthesizer_instructions_for_mode(resolved_mode: str) -> str:
+def _synthesizer_instructions_narrative() -> str:
+    return """You are an editor producing a narrative-focused result.
+Focus on story shape, emotional movement, and reflective meaning while keeping the same argument-mode schema.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- author_thesis
+- evidence_backed_points
+- interpretive_points
+- what_is_new
+- tensions
+- uncertainties
+- verification_items
+
+Rules:
+- Treat evidence_backed_points as story beats or scene anchors.
+- Treat interpretive_points as themes, implied meaning, or reflective readings.
+- Use verification_items sparingly; narrative writing may have none.
+- Use only evidence_segment_ids from the evidence_segments list."""
+
+
+def _synthesizer_instructions_for_mode(resolved_mode: str, route_key: str | None = None) -> str:
+    if route_key == "argument.politics_public_issue":
+        return _synthesizer_instructions_politics_public_issue()
+    if route_key == "argument.macro_business":
+        return _synthesizer_instructions_macro_business()
+    if route_key == "guide.game_guide":
+        return _synthesizer_instructions_game_guide()
+    if route_key == "narrative.personal_narrative":
+        return _synthesizer_instructions_narrative()
     if resolved_mode == "guide":
         return _synthesizer_instructions_guide()
     if resolved_mode == "review":
@@ -1065,6 +1191,12 @@ def _build_structured_result(
         save_worthy_points=[str(item).strip() for item in payload.get("save_worthy_points", []) if str(item).strip()],
     )
     mode_payload = _build_editorial_mode_payload(resolved_mode, payload)
+    product_view = _build_product_view(
+        routing=routing,
+        resolved_mode=resolved_mode,
+        editorial_base=editorial_base,
+        mode_payload=mode_payload,
+    )
     return StructuredResult(
         content_kind=content_kind,
         author_stance=author_stance,
@@ -1088,6 +1220,7 @@ def _build_structured_result(
             route_key=routing.route_key,
             mode_payload=mode_payload,
         ),
+        product_view=product_view,
     )
 
 
@@ -1190,6 +1323,27 @@ def _serialize_structured_result(result: StructuredResult | None) -> dict[str, o
         ],
         "warnings": [_serialize_warning_item(item) for item in result.warnings],
         "editorial": _serialize_editorial_result(result.editorial),
+        "product_view": _serialize_product_view(result.product_view),
+    }
+
+
+def _serialize_product_view(product_view: ProductView | None) -> dict[str, object] | None:
+    if product_view is None:
+        return None
+    return {
+        "layout": product_view.layout,
+        "template": product_view.template,
+        "title": product_view.title,
+        "dek": product_view.dek,
+        "sections": [
+            {
+                "kind": section.kind,
+                "title": section.title,
+                "body": section.body,
+                "items": section.items,
+            }
+            for section in product_view.sections
+        ],
     }
 
 
@@ -1261,6 +1415,277 @@ def _build_editorial_mode_payload(resolved_mode: str, payload: dict[str, object]
             for item in payload.get("verification_items", [])
         ],
     }
+
+
+def _build_product_view(
+    *,
+    routing: RoutingDecision,
+    resolved_mode: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> ProductView:
+    route_key = routing.route_key
+    if route_key == "argument.politics_public_issue":
+        return _build_analysis_brief_product_view(
+            template=route_key,
+            title=str(mode_payload.get("author_thesis") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+            dek=editorial_base.bottom_line,
+            summary_title="Public issue overview",
+            mode_payload=mode_payload,
+            include_verification=True,
+            final_section_kind="tensions",
+            final_section_title="Core tensions",
+            final_section_items=[str(item).strip() for item in mode_payload.get("tensions", []) if str(item).strip()],
+        )
+    if route_key == "argument.macro_business":
+        return _build_analysis_brief_product_view(
+            template=route_key,
+            title=str(mode_payload.get("author_thesis") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+            dek=editorial_base.bottom_line,
+            summary_title="Macro setup",
+            mode_payload=mode_payload,
+            include_verification=False,
+            final_section_kind="uncertainties",
+            final_section_title="Open uncertainties",
+            final_section_items=[str(item).strip() for item in mode_payload.get("uncertainties", []) if str(item).strip()],
+        )
+    if route_key == "guide.game_guide":
+        return _build_game_guide_product_view(editorial_base=editorial_base, mode_payload=mode_payload)
+    if route_key == "narrative.personal_narrative":
+        return _build_personal_narrative_product_view(editorial_base=editorial_base, mode_payload=mode_payload)
+    if route_key == "review.generic":
+        return _build_review_product_view(template=route_key, editorial_base=editorial_base, mode_payload=mode_payload)
+    return _build_generic_product_view(
+        route_key=route_key,
+        resolved_mode=resolved_mode,
+        editorial_base=editorial_base,
+        mode_payload=mode_payload,
+    )
+
+
+def _build_analysis_brief_product_view(
+    *,
+    template: str,
+    title: str,
+    dek: str,
+    summary_title: str,
+    mode_payload: dict[str, object],
+    include_verification: bool,
+    final_section_kind: str,
+    final_section_title: str,
+    final_section_items: list[str],
+) -> ProductView:
+    sections = [
+        ProductSection(
+            kind="summary",
+            title=summary_title,
+            body=str(mode_payload.get("what_is_new") or "").strip() or dek,
+        ),
+        ProductSection(
+            kind="key_points",
+            title="Key points",
+            items=[
+                {
+                    "id": str(item.get("id") or "").strip(),
+                    "title": str(item.get("title") or "").strip(),
+                    "body": str(item.get("details") or "").strip(),
+                    "evidence_segment_ids": [
+                        str(value).strip() for value in item.get("evidence_segment_ids", []) if str(value).strip()
+                    ],
+                }
+                for item in mode_payload.get("evidence_backed_points", [])
+            ],
+        ),
+    ]
+    if include_verification:
+        sections.append(
+            ProductSection(
+                kind="verification",
+                title="Verification",
+                items=[
+                    {
+                        "id": str(item.get("id") or "").strip(),
+                        "claim": str(item.get("claim") or "").strip(),
+                        "status": str(item.get("status") or "").strip(),
+                        "rationale": str(item.get("rationale") or "").strip(),
+                    }
+                    for item in mode_payload.get("verification_items", [])
+                ],
+            )
+        )
+    else:
+        sections.append(
+            ProductSection(
+                kind="implications",
+                title="Implications",
+                items=[
+                    {
+                        "id": str(item.get("id") or "").strip(),
+                        "kind": str(item.get("kind") or "").strip(),
+                        "statement": str(item.get("statement") or "").strip(),
+                    }
+                    for item in mode_payload.get("interpretive_points", [])
+                ],
+            )
+        )
+    sections.append(
+        ProductSection(
+            kind=final_section_kind,
+            title=final_section_title,
+            items=[{"text": item} for item in final_section_items],
+        )
+    )
+    return ProductView(
+        layout=_PRODUCT_VIEW_LAYOUTS[template],
+        template=template,
+        title=title,
+        dek=dek,
+        sections=sections,
+    )
+
+
+def _build_game_guide_product_view(*, editorial_base: EditorialBase, mode_payload: dict[str, object]) -> ProductView:
+    template = "guide.game_guide"
+    return ProductView(
+        layout=_PRODUCT_VIEW_LAYOUTS[template],
+        template=template,
+        title=str(mode_payload.get("guide_goal") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+        dek=editorial_base.bottom_line,
+        sections=[
+            ProductSection(
+                kind="quick_win",
+                title="Quick win",
+                body=str(mode_payload.get("quick_win") or editorial_base.bottom_line).strip() or editorial_base.bottom_line,
+            ),
+            ProductSection(
+                kind="steps",
+                title="Recommended steps",
+                items=[{"text": str(item).strip()} for item in mode_payload.get("recommended_steps", []) if str(item).strip()],
+            ),
+            ProductSection(
+                kind="tips",
+                title="Tips",
+                items=[{"text": str(item).strip()} for item in mode_payload.get("tips", []) if str(item).strip()],
+            ),
+            ProductSection(
+                kind="pitfalls",
+                title="Pitfalls",
+                items=[{"text": str(item).strip()} for item in mode_payload.get("pitfalls", []) if str(item).strip()],
+            ),
+        ],
+    )
+
+
+def _build_personal_narrative_product_view(*, editorial_base: EditorialBase, mode_payload: dict[str, object]) -> ProductView:
+    template = "narrative.personal_narrative"
+    return ProductView(
+        layout=_PRODUCT_VIEW_LAYOUTS[template],
+        template=template,
+        title=str(mode_payload.get("author_thesis") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+        dek=editorial_base.bottom_line,
+        sections=[
+            ProductSection(kind="summary", title="Summary", body=editorial_base.core_summary),
+            ProductSection(
+                kind="story_beats",
+                title="Story beats",
+                items=[
+                    {
+                        "id": str(item.get("id") or "").strip(),
+                        "title": str(item.get("title") or "").strip(),
+                        "body": str(item.get("details") or "").strip(),
+                    }
+                    for item in mode_payload.get("evidence_backed_points", [])
+                ],
+            ),
+            ProductSection(
+                kind="themes",
+                title="Themes",
+                items=[
+                    {"id": str(item.get("id") or "").strip(), "statement": str(item.get("statement") or "").strip()}
+                    for item in mode_payload.get("interpretive_points", [])
+                ],
+            ),
+            ProductSection(kind="takeaway", title="Takeaway", body=editorial_base.bottom_line),
+        ],
+    )
+
+
+def _build_review_product_view(
+    *,
+    template: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> ProductView:
+    return ProductView(
+        layout=_PRODUCT_VIEW_LAYOUTS[template],
+        template=template,
+        title=str(mode_payload.get("overall_judgment") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+        dek=editorial_base.bottom_line,
+        sections=[
+            ProductSection(kind="summary", title="Summary", body=editorial_base.core_summary),
+            ProductSection(
+                kind="highlights",
+                title="Highlights",
+                items=[{"text": str(item).strip()} for item in mode_payload.get("highlights", []) if str(item).strip()],
+            ),
+            ProductSection(kind="audience", title="Who it's for", body=str(mode_payload.get("who_it_is_for") or editorial_base.audience_fit).strip()),
+            ProductSection(
+                kind="reservations",
+                title="Reservations",
+                items=[{"text": str(item).strip()} for item in mode_payload.get("reservation_points", []) if str(item).strip()],
+            ),
+        ],
+    )
+
+
+def _build_generic_product_view(
+    *,
+    route_key: str,
+    resolved_mode: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> ProductView:
+    if resolved_mode == "guide":
+        template = route_key if route_key in _PRODUCT_VIEW_LAYOUTS else "guide.generic"
+        return ProductView(
+            layout="practical_guide",
+            template=template,
+            title=str(mode_payload.get("guide_goal") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+            dek=editorial_base.bottom_line,
+            sections=[
+                ProductSection(kind="summary", title="Summary", body=editorial_base.core_summary),
+                ProductSection(
+                    kind="steps",
+                    title="Steps",
+                    items=[{"text": str(item).strip()} for item in mode_payload.get("recommended_steps", []) if str(item).strip()],
+                ),
+            ],
+        )
+    if resolved_mode == "review":
+        template = route_key if route_key in _PRODUCT_VIEW_LAYOUTS else "review.generic"
+        return _build_review_product_view(template=template, editorial_base=editorial_base, mode_payload=mode_payload)
+    template = route_key
+    return ProductView(
+        layout="analysis_brief",
+        template=template,
+        title=str(mode_payload.get("author_thesis") or editorial_base.core_summary).strip() or editorial_base.core_summary,
+        dek=editorial_base.bottom_line,
+        sections=[
+            ProductSection(kind="summary", title="Summary", body=editorial_base.core_summary),
+            ProductSection(
+                kind="key_points",
+                title="Key points",
+                items=[
+                    {
+                        "id": str(item.get("id") or "").strip(),
+                        "title": str(item.get("title") or "").strip(),
+                        "body": str(item.get("details") or "").strip(),
+                    }
+                    for item in mode_payload.get("evidence_backed_points", [])
+                ],
+            ),
+        ],
+    )
 
 
 def _build_legacy_summary(

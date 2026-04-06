@@ -141,6 +141,23 @@ class EditorialResult:
 
 
 @dataclass(slots=True)
+class ProductSection:
+    kind: str
+    title: str
+    body: str | None = None
+    items: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class ProductView:
+    layout: str
+    template: str
+    title: str
+    dek: str | None = None
+    sections: list[ProductSection] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class StructuredResult:
     content_kind: str | None = None
     author_stance: str | None = None
@@ -153,6 +170,7 @@ class StructuredResult:
     warnings: list[WarningItem] = field(default_factory=list)
     chapter_map: list[ChapterEntry] = field(default_factory=list)
     editorial: EditorialResult | None = None
+    product_view: ProductView | None = None
 
 
 @dataclass(slots=True)

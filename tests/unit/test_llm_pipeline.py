@@ -123,6 +123,10 @@ class _FakeClient:
 
 
 def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("ZENMUX_API_KEY", raising=False)
+    monkeypatch.delenv("ZENMUX_BASE_URL", raising=False)
+    monkeypatch.delenv("ZENMUX_ANALYSIS_MODEL", raising=False)
+    monkeypatch.delenv("ZENMUX_MULTIMODAL_MODEL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1-mini")
     monkeypatch.setenv("CONTENT_INGESTION_MULTIMODAL_MODEL", "gpt-4.1")
@@ -224,6 +228,8 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert result.structured_result.editorial.resolved_domain_template == "generic"
     assert result.structured_result.editorial.domain_confidence == 0.82
     assert result.structured_result.editorial.route_key == "argument.generic"
+    assert result.structured_result.product_view is not None
+    assert result.structured_result.product_view.layout == "analysis_brief"
     assert result.reader_result_path == "analysis/llm/reader_result.json"
     assert result.synthesizer_result_path == "analysis/llm/synthesizer_result.json"
     assert (job_dir / "analysis" / "llm" / "reader_result.json").exists()
@@ -247,9 +253,15 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert analysis_result_payload["result"]["editorial"]["resolved_domain_template"] == "generic"
     assert analysis_result_payload["result"]["editorial"]["domain_confidence"] == 0.82
     assert analysis_result_payload["result"]["editorial"]["route_key"] == "argument.generic"
+    assert analysis_result_payload["result"]["product_view"]["layout"] == "analysis_brief"
+    assert analysis_result_payload["result"]["product_view"]["template"] == "argument.generic"
 
 
 def test_analyze_asset_skips_without_api_key(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("ZENMUX_API_KEY", raising=False)
+    monkeypatch.delenv("ZENMUX_BASE_URL", raising=False)
+    monkeypatch.delenv("ZENMUX_ANALYSIS_MODEL", raising=False)
+    monkeypatch.delenv("ZENMUX_MULTIMODAL_MODEL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     settings = load_settings()
     asset = ContentAsset(
@@ -883,6 +895,319 @@ def test_build_structured_result_review_mode_builds_editorial() -> None:
     assert result.editorial.resolved_mode == "review"
     assert result.editorial.mode_payload["overall_judgment"] == "excellent"
     assert result.editorial.mode_payload["highlights"] == ["Great production"]
+
+
+def test_build_structured_result_builds_specialized_product_view_for_politics_argument() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "Policy proposal summary",
+        "bottom_line": "The proposal is directionally strong but underspecified on costs.",
+        "content_kind": "analysis",
+        "author_stance": "critical",
+        "audience_fit": "readers tracking public policy arguments",
+        "save_worthy_points": ["The fiscal tradeoff is central."],
+        "author_thesis": "The policy could help, but the current case is incomplete.",
+        "evidence_backed_points": [
+            {
+                "id": "kp-1",
+                "title": "Cost assumptions are thin",
+                "details": "The author cites benefits more clearly than financing details.",
+                "evidence_segment_ids": ["e1"],
+            }
+        ],
+        "interpretive_points": [
+            {
+                "id": "an-1",
+                "statement": "Implementation risk is understated.",
+                "kind": "implication",
+                "evidence_segment_ids": ["e1"],
+            }
+        ],
+        "what_is_new": "It combines local budget pressure with service-quality concerns.",
+        "tensions": ["The piece calls for urgency while omitting a concrete funding path."],
+        "uncertainties": ["How the policy would be paid for across regions."],
+        "verification_items": [
+            {
+                "id": "ver-1",
+                "claim": "The proposal reduces wait times.",
+                "status": "partial",
+                "evidence_segment_ids": ["e1"],
+                "rationale": "The evidence is suggestive rather than conclusive.",
+                "confidence": 0.7,
+            }
+        ],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="argument",
+            domain_template="politics_public_issue",
+            route_key="argument.politics_public_issue",
+            goal_confidence=0.88,
+            domain_confidence=0.84,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.88,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "analysis_brief"
+    assert result.product_view.template == "argument.politics_public_issue"
+    assert result.product_view.title == "The policy could help, but the current case is incomplete."
+    assert result.product_view.sections[0].kind == "summary"
+    assert result.product_view.sections[1].kind == "key_points"
+    assert result.product_view.sections[2].kind == "verification"
+    assert result.product_view.sections[3].kind == "tensions"
+
+
+def test_build_structured_result_builds_specialized_product_view_for_macro_business_argument() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "Macro summary",
+        "bottom_line": "The analysis is useful, but recession timing remains uncertain.",
+        "content_kind": "analysis",
+        "author_stance": "skeptical",
+        "audience_fit": "readers following the macro cycle",
+        "save_worthy_points": ["Credit conditions matter more than headline inflation."],
+        "author_thesis": "The cycle is slowing, but not all indicators point the same way.",
+        "evidence_backed_points": [
+            {
+                "id": "kp-1",
+                "title": "Labor remains firmer than expected",
+                "details": "The labor market data complicates the bearish call.",
+                "evidence_segment_ids": ["e1"],
+            }
+        ],
+        "interpretive_points": [
+            {
+                "id": "an-1",
+                "statement": "Risk assets may be mispricing the timing of the slowdown.",
+                "kind": "alternative",
+                "evidence_segment_ids": [],
+            }
+        ],
+        "what_is_new": "It ties credit tightening to lagging consumer weakness.",
+        "tensions": ["Soft-landing language conflicts with the severity of the downside case."],
+        "uncertainties": ["Whether policy easing arrives before earnings weaken."],
+        "verification_items": [],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="argument",
+            domain_template="macro_business",
+            route_key="argument.macro_business",
+            goal_confidence=0.86,
+            domain_confidence=0.83,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.86,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "analysis_brief"
+    assert result.product_view.template == "argument.macro_business"
+    assert result.product_view.sections[0].kind == "summary"
+    assert result.product_view.sections[1].kind == "key_points"
+    assert result.product_view.sections[2].kind == "implications"
+    assert result.product_view.sections[3].kind == "uncertainties"
+
+
+def test_build_structured_result_builds_specialized_product_view_for_game_guide() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "Route summary",
+        "bottom_line": "Focus on stamina upgrades before the boss rush.",
+        "content_kind": "tutorial",
+        "author_stance": "explanatory",
+        "audience_fit": "players learning the midgame route",
+        "save_worthy_points": ["You can skip an early grind."],
+        "guide_goal": "Reach the midgame quickly with a safe build.",
+        "recommended_steps": ["Unlock the canyon shortcut.", "Buy the second stamina upgrade."],
+        "tips": ["Use the merchant reset after each miniboss."],
+        "pitfalls": ["Do not spend shards on early weapons."],
+        "prerequisites": ["Finish the tutorial temple."],
+        "quick_win": "Grab the free map item first.",
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="guide",
+            domain_template="game_guide",
+            route_key="guide.game_guide",
+            goal_confidence=0.94,
+            domain_confidence=0.92,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="guide",
+        resolved_mode="guide",
+        mode_confidence=0.94,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "practical_guide"
+    assert result.product_view.template == "guide.game_guide"
+    assert result.product_view.title == "Reach the midgame quickly with a safe build."
+    assert result.product_view.sections[0].kind == "quick_win"
+    assert result.product_view.sections[1].kind == "steps"
+    assert result.product_view.sections[2].kind == "tips"
+    assert result.product_view.sections[3].kind == "pitfalls"
+
+
+def test_build_structured_result_builds_specialized_product_view_for_personal_narrative() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "Memoir summary",
+        "bottom_line": "The story lands because the emotional shift is specific and earned.",
+        "content_kind": "article",
+        "author_stance": "mixed",
+        "audience_fit": "readers who like reflective personal writing",
+        "save_worthy_points": ["A small family detail reframes the whole story."],
+        "author_thesis": "A routine visit becomes a story about inherited fear and care.",
+        "evidence_backed_points": [
+            {
+                "id": "kp-1",
+                "title": "The opening grounds the scene",
+                "details": "Concrete details establish the narrator's unease before reflection begins.",
+                "evidence_segment_ids": [],
+            }
+        ],
+        "interpretive_points": [
+            {
+                "id": "an-1",
+                "statement": "The narrator is really writing about responsibility rather than the event itself.",
+                "kind": "implication",
+                "evidence_segment_ids": [],
+            }
+        ],
+        "what_is_new": "It connects a private memory to a wider inherited pattern without overstating it.",
+        "tensions": ["The narrator wants distance but writes with intimate detail."],
+        "uncertainties": ["How representative the family story is beyond this moment."],
+        "verification_items": [],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="narrative",
+            domain_template="personal_narrative",
+            route_key="narrative.personal_narrative",
+            goal_confidence=0.9,
+            domain_confidence=0.9,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.9,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "narrative_digest"
+    assert result.product_view.template == "narrative.personal_narrative"
+    assert result.product_view.title == "A routine visit becomes a story about inherited fear and care."
+    assert result.product_view.sections[0].kind == "summary"
+    assert result.product_view.sections[1].kind == "story_beats"
+    assert result.product_view.sections[2].kind == "themes"
+    assert result.product_view.sections[3].kind == "takeaway"
+
+
+def test_build_structured_result_builds_generic_review_product_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "Review summary",
+        "bottom_line": "Worth trying if you like slow, atmospheric work.",
+        "content_kind": "review",
+        "author_stance": "mixed",
+        "audience_fit": "fans of quiet games",
+        "save_worthy_points": ["The art direction carries the experience."],
+        "overall_judgment": "Strong but niche.",
+        "highlights": ["Excellent atmosphere", "Distinct visual design"],
+        "style_and_mood": "slow and moody",
+        "what_stands_out": "Its confidence in withholding explanation.",
+        "who_it_is_for": "players who enjoy ambiguity",
+        "reservation_points": ["The pacing will not work for everyone."],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="review",
+            domain_template="generic",
+            route_key="review.generic",
+            goal_confidence=0.81,
+            domain_confidence=0.0,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="review",
+        resolved_mode="review",
+        mode_confidence=0.81,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "review_curation"
+    assert result.product_view.template == "review.generic"
+    assert result.product_view.title == "Strong but niche."
+    assert result.product_view.sections[0].kind == "summary"
+    assert result.product_view.sections[1].kind == "highlights"
+    assert result.product_view.sections[2].kind == "audience"
+    assert result.product_view.sections[3].kind == "reservations"
+
+
+def test_synthesizer_instruction_dispatch_specializes_politics_argument_route() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _synthesizer_instructions_for_mode
+
+    instructions = _synthesizer_instructions_for_mode("argument", "argument.politics_public_issue")
+
+    assert "public-issue" in instructions or "public issue" in instructions
+    assert "tradeoff" in instructions or "trade-off" in instructions
+
+
+def test_synthesizer_instruction_dispatch_specializes_macro_business_route() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _synthesizer_instructions_for_mode
+
+    instructions = _synthesizer_instructions_for_mode("argument", "argument.macro_business")
+
+    assert "macro" in instructions
+    assert "cycle" in instructions or "business" in instructions
+
+
+def test_synthesizer_instruction_dispatch_specializes_game_guide_route() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _synthesizer_instructions_for_mode
+
+    instructions = _synthesizer_instructions_for_mode("guide", "guide.game_guide")
+
+    assert "game" in instructions
+    assert "player" in instructions or "build" in instructions or "route" in instructions
+
+
+def test_synthesizer_instruction_dispatch_keeps_generic_argument_fallback() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _synthesizer_instructions_argument, _synthesizer_instructions_for_mode
+
+    instructions = _synthesizer_instructions_for_mode("argument", "argument.generic")
+
+    assert instructions == _synthesizer_instructions_argument()
 
 
 def test_analyze_asset_cleans_invalid_evidence_references(monkeypatch, tmp_path: Path) -> None:

@@ -152,6 +152,7 @@ class JobProcessor:
                     capture_validation,
                     media_processing,
                     llm_analysis,
+                    target_dir,
                 ),
             },
         }
@@ -266,8 +267,10 @@ class JobProcessor:
         capture_validation: dict[str, Any] | None,
         media_processing,
         llm_analysis,
+        target_dir: Path,
     ) -> dict[str, object]:
         normalized_metadata = dict(asset.metadata)
+        routing_signals = self._load_routing_signals(target_dir, llm_analysis)
         handoff_context = {
             key: value
             for key in (
@@ -318,6 +321,14 @@ class JobProcessor:
             "requested_mode": llm_analysis.requested_mode,
             "resolved_mode": llm_analysis.resolved_mode,
             "mode_confidence": llm_analysis.mode_confidence,
+            "requested_reading_goal": llm_analysis.requested_reading_goal,
+            "resolved_reading_goal": llm_analysis.resolved_reading_goal,
+            "goal_confidence": llm_analysis.goal_confidence,
+            "requested_domain_template": llm_analysis.requested_domain_template,
+            "resolved_domain_template": llm_analysis.resolved_domain_template,
+            "domain_template_confidence": llm_analysis.domain_confidence,
+            "route_key": llm_analysis.route_key,
+            "routing_signals": routing_signals,
             "supported_input_modalities": llm_analysis.supported_input_modalities,
             "text_input_modality": llm_analysis.text_input_modality,
             "multimodal_input_modality": llm_analysis.multimodal_input_modality,
@@ -347,6 +358,36 @@ class JobProcessor:
             },
         }
         return normalized_metadata
+
+    def _load_routing_signals(self, target_dir: Path, llm_analysis) -> dict[str, Any]:
+        reader_result_path = getattr(llm_analysis, "reader_result_path", None)
+        if not reader_result_path:
+            return {}
+        reader_payload_path = target_dir.joinpath(*Path(reader_result_path).parts)
+        if not reader_payload_path.exists():
+            return {}
+        try:
+            payload = json.loads(reader_payload_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("failed to read reader result artifact: %s", reader_payload_path)
+            return {}
+
+        routing_signals: dict[str, Any] = {}
+        for key in (
+            "suggested_mode",
+            "mode_confidence",
+            "suggested_reading_goal",
+            "goal_confidence",
+            "suggested_domain_template",
+            "domain_confidence",
+        ):
+            value = payload.get(key)
+            if value is not None:
+                routing_signals[key] = value
+        content_signals = payload.get("content_signals")
+        if isinstance(content_signals, dict):
+            routing_signals["content_signals"] = content_signals
+        return routing_signals
 
     def _load_capture_validation_summary(
         self,
@@ -574,6 +615,7 @@ class JobProcessor:
             "warnings": warnings_payload,
             "chapter_map": chapter_map_payload,
             "editorial": self._serialize_editorial_result(getattr(result, "editorial", None)),
+            "product_view": self._serialize_product_view(getattr(result, "product_view", None)),
             "evidence_backlinks": evidence_backlinks,
             "result_index": result_index,
             "display_plan": self._build_display_plan(
@@ -639,11 +681,37 @@ class JobProcessor:
             "requested_mode": editorial.requested_mode,
             "resolved_mode": editorial.resolved_mode,
             "mode_confidence": editorial.mode_confidence,
+            "requested_reading_goal": editorial.requested_reading_goal,
+            "resolved_reading_goal": editorial.resolved_reading_goal,
+            "goal_confidence": editorial.goal_confidence,
+            "requested_domain_template": editorial.requested_domain_template,
+            "resolved_domain_template": editorial.resolved_domain_template,
+            "domain_confidence": editorial.domain_confidence,
+            "route_key": editorial.route_key,
             "base": base_payload,
             "mode_payload": self._serialize_editorial_mode_payload(
                 editorial.resolved_mode,
                 editorial.mode_payload,
             ),
+        }
+
+    def _serialize_product_view(self, product_view) -> dict[str, Any] | None:
+        if product_view is None:
+            return None
+        return {
+            "layout": product_view.layout,
+            "template": product_view.template,
+            "title": product_view.title,
+            "dek": product_view.dek,
+            "sections": [
+                {
+                    "kind": section.kind,
+                    "title": section.title,
+                    "body": section.body,
+                    "items": section.items,
+                }
+                for section in product_view.sections
+            ],
         }
 
     def _serialize_editorial_mode_payload(self, resolved_mode: str, payload: dict[str, Any]) -> dict[str, Any]:

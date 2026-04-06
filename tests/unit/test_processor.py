@@ -218,6 +218,10 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
                                 },
                                 "suggested_mode": "argument",
                                 "mode_confidence": 0.88,
+                                "suggested_reading_goal": "argument",
+                                "goal_confidence": 0.88,
+                                "suggested_domain_template": "generic",
+                                "domain_confidence": 0.82,
                             }
                         )
                     },
@@ -451,6 +455,11 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     assert asset["metadata"]["llm_processing"]["requested_mode"] == "auto"
     assert asset["metadata"]["llm_processing"]["resolved_mode"] == "argument"
     assert asset["metadata"]["llm_processing"]["mode_confidence"] == 0.88
+    assert asset["metadata"]["llm_processing"]["resolved_domain_template"] == "generic"
+    assert asset["metadata"]["llm_processing"]["domain_template_confidence"] == 0.82
+    assert asset["metadata"]["llm_processing"]["routing_signals"]["suggested_reading_goal"] == "argument"
+    assert asset["metadata"]["llm_processing"]["routing_signals"]["suggested_domain_template"] == "generic"
+    assert asset["metadata"]["llm_processing"]["routing_signals"]["content_signals"]["estimated_depth"] == "medium"
     assert asset["metadata"]["llm_processing"]["handshake"]["request_artifacts"]["text"] == "analysis/llm/text_request.json"
     assert asset["metadata"]["llm_processing"]["handshake"]["analysis_model"] == "gpt-4.1-mini"
     assert asset["metadata"]["llm_processing"]["handshake"]["schema_mode"] == "json_schema"
@@ -462,9 +471,28 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     assert asset["metadata"]["llm_processing"]["structured_result_available"] is True
     assert asset["result"]["editorial"]["requested_mode"] == "auto"
     assert asset["result"]["editorial"]["resolved_mode"] == "argument"
+    assert asset["result"]["editorial"]["requested_reading_goal"] is None
+    assert asset["result"]["editorial"]["resolved_reading_goal"] == "argument"
+    assert asset["result"]["editorial"]["goal_confidence"] == 0.88
+    assert asset["result"]["editorial"]["requested_domain_template"] is None
+    assert asset["result"]["editorial"]["resolved_domain_template"] == "generic"
+    assert asset["result"]["editorial"]["domain_confidence"] == 0.82
+    assert asset["result"]["editorial"]["route_key"] == "argument.generic"
     assert asset["result"]["editorial"]["base"]["core_summary"]["display"]["kind"] == "summary"
     assert asset["result"]["editorial"]["mode_payload"]["author_thesis"]["display"]["kind"] == "thesis"
     assert asset["result"]["editorial"]["mode_payload"]["evidence_backed_points"][0]["display"]["kind"] == "evidence"
+    assert asset["result"]["product_view"]["layout"] == "analysis_brief"
+    assert asset["result"]["product_view"]["template"] == "argument.generic"
+    assert asset["result"]["product_view"]["title"] == "Transcript summary"
+    assert asset["result"]["product_view"]["dek"] == "Synthesized answer"
+    assert len(asset["result"]["product_view"]["sections"]) == 2
+    assert asset["result"]["product_view"]["sections"][0]["kind"] == "summary"
+    assert asset["result"]["product_view"]["sections"][0]["title"] == "Summary"
+    assert asset["result"]["product_view"]["sections"][0]["body"] == "Summarized transcript"
+    assert asset["result"]["product_view"]["sections"][1]["kind"] == "key_points"
+    assert asset["result"]["product_view"]["sections"][1]["title"] == "Key points"
+    assert asset["result"]["product_view"]["sections"][1]["items"][0]["title"] == "Key point"
+    assert asset["result"]["product_view"]["sections"][1]["items"][0]["body"] == "Important supporting detail"
     assert asset["metadata"]["media_processing"]["media_kind"] == "video"
     assert asset["metadata"]["media_processing"]["transcript_text_available"] is True
     assert asset["metadata"]["media_processing"]["multimodal_frame_paths"]

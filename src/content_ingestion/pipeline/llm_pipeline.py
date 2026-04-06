@@ -351,6 +351,8 @@ def analyze_asset(
     asset: ContentAsset,
     settings: Settings,
     requested_mode: str = "auto",
+    requested_reading_goal: str | None = None,
+    requested_domain_template: str | None = None,
 ) -> LlmAnalysisResult:
     text_envelope = build_text_analysis_envelope(
         asset=asset,
@@ -440,7 +442,12 @@ def analyze_asset(
     )
     result.reader_result_path = reader_result_path.relative_to(job_dir).as_posix()
     result.steps.append({"name": "llm_reader_pass", "status": "success", "details": settings.analysis_model})
-    routing = _resolve_routing(requested_mode=requested_mode, reader_payload=reader_payload)
+    routing = _resolve_routing(
+        requested_reading_goal=requested_reading_goal,
+        requested_domain_template=requested_domain_template,
+        requested_mode=requested_mode,
+        reader_payload=reader_payload,
+    )
     resolved_mode = _reading_goal_to_mode(routing.reading_goal)
     mode_confidence = routing.goal_confidence
     result.requested_mode = requested_mode
@@ -1647,43 +1654,82 @@ def _build_generic_product_view(
 ) -> ProductView:
     if resolved_mode == "guide":
         template = route_key if route_key in _PRODUCT_VIEW_LAYOUTS else "guide.generic"
+        takeaway_items = [
+            {"text": str(item).strip()}
+            for item in mode_payload.get("recommended_steps", [])
+            if str(item).strip()
+        ][:5]
+        remember_this = str(mode_payload.get("quick_win") or editorial_base.bottom_line).strip() or editorial_base.bottom_line
         return ProductView(
             layout="practical_guide",
             template=template,
             title=str(mode_payload.get("guide_goal") or editorial_base.core_summary).strip() or editorial_base.core_summary,
             dek=editorial_base.bottom_line,
             sections=[
-                ProductSection(kind="summary", title="Summary", body=editorial_base.core_summary),
+                ProductSection(kind="one_line_summary", title="一句话总结", body=editorial_base.core_summary),
                 ProductSection(
-                    kind="steps",
-                    title="Steps",
-                    items=[{"text": str(item).strip()} for item in mode_payload.get("recommended_steps", []) if str(item).strip()],
+                    kind="core_takeaways",
+                    title="核心要点",
+                    items=takeaway_items,
                 ),
+                ProductSection(kind="remember_this", title="记住这件事", body=remember_this),
             ],
         )
     if resolved_mode == "review":
         template = route_key if route_key in _PRODUCT_VIEW_LAYOUTS else "review.generic"
         return _build_review_product_view(template=template, editorial_base=editorial_base, mode_payload=mode_payload)
     template = route_key
+    argument_items = [
+        {
+            "id": str(item.get("id") or "").strip(),
+            "title": str(item.get("title") or "").strip(),
+            "body": str(item.get("details") or "").strip(),
+        }
+        for item in mode_payload.get("evidence_backed_points", [])
+    ]
+    evidence_items = [
+        {
+            "id": str(item.get("id") or "").strip(),
+            "text": str(item.get("details") or item.get("title") or "").strip(),
+            "evidence_segment_ids": [
+                str(value).strip() for value in item.get("evidence_segment_ids", []) if str(value).strip()
+            ],
+        }
+        for item in mode_payload.get("evidence_backed_points", [])
+    ]
+    tension_items = [
+        {"text": str(item).strip()}
+        for item in mode_payload.get("tensions", [])
+        if str(item).strip()
+    ]
+    verification_items = [
+        {
+            "id": str(item.get("id") or "").strip(),
+            "claim": str(item.get("claim") or "").strip(),
+            "status": str(item.get("status") or "").strip(),
+            "rationale": str(item.get("rationale") or "").strip(),
+        }
+        for item in mode_payload.get("verification_items", [])
+    ]
     return ProductView(
         layout="analysis_brief",
         template=template,
         title=str(mode_payload.get("author_thesis") or editorial_base.core_summary).strip() or editorial_base.core_summary,
         dek=editorial_base.bottom_line,
         sections=[
-            ProductSection(kind="summary", title="Summary", body=editorial_base.core_summary),
             ProductSection(
-                kind="key_points",
-                title="Key points",
-                items=[
-                    {
-                        "id": str(item.get("id") or "").strip(),
-                        "title": str(item.get("title") or "").strip(),
-                        "body": str(item.get("details") or "").strip(),
-                    }
-                    for item in mode_payload.get("evidence_backed_points", [])
-                ],
+                kind="core_judgment",
+                title="核心判断",
+                body=str(mode_payload.get("what_is_new") or editorial_base.core_summary).strip() or editorial_base.core_summary,
             ),
+            ProductSection(
+                kind="main_arguments",
+                title="主要论点",
+                items=argument_items,
+            ),
+            ProductSection(kind="evidence", title="关键论据", items=evidence_items),
+            ProductSection(kind="tensions", title="张力与漏洞", items=tension_items),
+            ProductSection(kind="verification", title="验证与保留意见", items=verification_items),
         ],
     )
 
@@ -1879,7 +1925,82 @@ def _validate_structured_result_evidence(
                 )
             )
     result.warnings.extend(warnings)
+    _sync_editorial_and_product_view_evidence(result)
     return warnings
+
+
+def _sync_editorial_and_product_view_evidence(result: StructuredResult) -> None:
+    if result.editorial is not None:
+        mode_payload = result.editorial.mode_payload
+        _sync_payload_items(
+            payload_items=mode_payload.get("evidence_backed_points", []),
+            result_items=result.key_points,
+            apply=lambda payload_item, result_item: payload_item.__setitem__(
+                "evidence_segment_ids", list(result_item.evidence_segment_ids)
+            ),
+        )
+        _sync_payload_items(
+            payload_items=mode_payload.get("interpretive_points", []),
+            result_items=result.analysis_items,
+            apply=lambda payload_item, result_item: payload_item.__setitem__(
+                "evidence_segment_ids", list(result_item.evidence_segment_ids)
+            ),
+        )
+        _sync_payload_items(
+            payload_items=mode_payload.get("verification_items", []),
+            result_items=result.verification_items,
+            apply=lambda payload_item, result_item: payload_item.update(
+                {
+                    "evidence_segment_ids": list(result_item.evidence_segment_ids),
+                    "status": result_item.status,
+                    "rationale": result_item.rationale,
+                }
+            ),
+        )
+
+    if result.product_view is None:
+        return
+    for section in result.product_view.sections:
+        if section.kind != "key_points":
+            continue
+        _sync_payload_items(
+            payload_items=section.items,
+            result_items=result.key_points,
+            apply=lambda payload_item, result_item: payload_item.__setitem__(
+                "evidence_segment_ids", list(result_item.evidence_segment_ids)
+            ),
+        )
+
+
+def _sync_payload_items(payload_items: list[dict[str, object]], result_items: list[object], apply) -> None:
+    payload_id_counts = _count_nonempty_ids(payload_items)
+    result_id_counts = _count_nonempty_ids(result_items)
+    result_items_by_id = {
+        item.id: item
+        for item in result_items
+        if getattr(item, "id", "") and result_id_counts.get(item.id, 0) == 1
+    }
+
+    for index, payload_item in enumerate(payload_items):
+        payload_id = str(payload_item.get("id") or "").strip()
+        matched_item = None
+        if payload_id and payload_id_counts.get(payload_id, 0) == 1:
+            matched_item = result_items_by_id.get(payload_id)
+        if matched_item is None and index < len(result_items):
+            matched_item = result_items[index]
+        if matched_item is not None:
+            apply(payload_item, matched_item)
+
+
+def _count_nonempty_ids(items: list[object]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        item_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", "")
+        normalized = str(item_id or "").strip()
+        if not normalized:
+            continue
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
 
 
 def _filter_valid_evidence_ids(

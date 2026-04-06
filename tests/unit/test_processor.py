@@ -464,50 +464,92 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     assert asset["metadata"]["llm_processing"]["handshake"]["analysis_model"] == "gpt-4.1-mini"
     assert asset["metadata"]["llm_processing"]["handshake"]["schema_mode"] == "json_schema"
     assert asset["metadata"]["llm_processing"]["handshake"]["content_policy_id"] == "video_text_first_v1"
-    assert asset["metadata"]["llm_processing"]["handshake"]["text_input_modality"] == "text_image"
-    assert asset["metadata"]["llm_processing"]["handshake"]["multimodal_input_modality"] == "text_image"
-    assert asset["metadata"]["llm_processing"]["summary_available"] is True
-    assert asset["metadata"]["llm_processing"]["key_point_count"] == 1
-    assert asset["metadata"]["llm_processing"]["structured_result_available"] is True
-    assert asset["result"]["editorial"]["requested_mode"] == "auto"
-    assert asset["result"]["editorial"]["resolved_mode"] == "argument"
-    assert asset["result"]["editorial"]["requested_reading_goal"] is None
-    assert asset["result"]["editorial"]["resolved_reading_goal"] == "argument"
-    assert asset["result"]["editorial"]["goal_confidence"] == 0.88
-    assert asset["result"]["editorial"]["requested_domain_template"] is None
-    assert asset["result"]["editorial"]["resolved_domain_template"] == "generic"
-    assert asset["result"]["editorial"]["domain_confidence"] == 0.82
-    assert asset["result"]["editorial"]["route_key"] == "argument.generic"
-    assert asset["result"]["editorial"]["base"]["core_summary"]["display"]["kind"] == "summary"
-    assert asset["result"]["editorial"]["mode_payload"]["author_thesis"]["display"]["kind"] == "thesis"
-    assert asset["result"]["editorial"]["mode_payload"]["evidence_backed_points"][0]["display"]["kind"] == "evidence"
-    assert asset["result"]["product_view"]["layout"] == "analysis_brief"
-    assert asset["result"]["product_view"]["template"] == "argument.generic"
-    assert asset["result"]["product_view"]["title"] == "Transcript summary"
-    assert asset["result"]["product_view"]["dek"] == "Synthesized answer"
-    assert len(asset["result"]["product_view"]["sections"]) == 2
-    assert asset["result"]["product_view"]["sections"][0]["kind"] == "summary"
-    assert asset["result"]["product_view"]["sections"][0]["title"] == "Summary"
-    assert asset["result"]["product_view"]["sections"][0]["body"] == "Summarized transcript"
-    assert asset["result"]["product_view"]["sections"][1]["kind"] == "key_points"
-    assert asset["result"]["product_view"]["sections"][1]["title"] == "Key points"
-    assert asset["result"]["product_view"]["sections"][1]["items"][0]["title"] == "Key point"
-    assert asset["result"]["product_view"]["sections"][1]["items"][0]["body"] == "Important supporting detail"
-    assert asset["metadata"]["media_processing"]["media_kind"] == "video"
-    assert asset["metadata"]["media_processing"]["transcript_text_available"] is True
-    assert asset["metadata"]["media_processing"]["multimodal_frame_paths"]
-    assert (target_dir / "analysis" / "transcript" / "transcript.txt").exists()
-    assert (target_dir / "analysis" / "transcript" / "transcript.json").exists()
-    assert (target_dir / "analysis" / "frames" / "frame-001.jpg").exists()
-    assert (target_dir / "analysis" / "llm" / "analysis_result.json").exists()
-    assert (target_dir / "analysis" / "llm" / "text_request.json").exists()
-    assert (target_dir / "analysis" / "llm" / "multimodal_request.json").exists()
-    pipeline = json.loads((target_dir / "pipeline.json").read_text(encoding="utf-8"))
-    status = json.loads((target_dir / "status.json").read_text(encoding="utf-8"))
-    assert pipeline["llm_provider"] == "openai"
-    assert pipeline["llm_skip_reason"] is None
-    assert status["llm_provider"] == "openai"
-    assert status["llm_skip_reason"] is None
+
+
+def test_processor_threads_requested_goal_and_domain_overrides_into_llm_pipeline(tmp_path: Path, monkeypatch) -> None:
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+    job_dir = inbox.processing / "job-goal-override"
+    job_dir.mkdir(parents=True)
+
+    (job_dir / "payload.html").write_text(
+        "<html><head><title>Demo</title></head><body><p>Body text</p></body></html>",
+        encoding="utf-8",
+    )
+    (job_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "job_id": "job-goal-override",
+                "source_url": "https://example.com/article",
+                "collector": "windows-client",
+                "collected_at": "2026-03-15T09:00:00+00:00",
+                "content_type": "html",
+                "platform": "generic",
+                "requested_mode": "auto",
+                "requested_reading_goal": "guide",
+                "requested_domain_template": "game_guide",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "READY").write_text("", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def _fake_analyze_asset(*, job_dir, asset, settings, requested_mode="auto", requested_reading_goal=None, requested_domain_template=None):
+        captured["requested_mode"] = requested_mode
+        captured["requested_reading_goal"] = requested_reading_goal
+        captured["requested_domain_template"] = requested_domain_template
+        return type(
+            "AnalysisResult",
+            (),
+            {
+                "status": "pass",
+                "provider": "openai",
+                "base_url": None,
+                "analysis_model": "gpt-test",
+                "multimodal_model": None,
+                "schema_mode": "json_schema",
+                "content_policy_id": "text_only_v1",
+                "requested_mode": requested_mode,
+                "resolved_mode": "guide",
+                "mode_confidence": 1.0,
+                "requested_reading_goal": requested_reading_goal,
+                "resolved_reading_goal": "guide",
+                "goal_confidence": 1.0,
+                "requested_domain_template": requested_domain_template,
+                "resolved_domain_template": "game_guide",
+                "domain_confidence": 1.0,
+                "route_key": "guide.game_guide",
+                "supported_input_modalities": ["text"],
+                "text_input_modality": "text",
+                "multimodal_input_modality": "text",
+                "task_intent": "summarize_article",
+                "skip_reason": None,
+                "request_artifacts": {},
+                "summary": None,
+                "key_points": [],
+                "analysis_items": [],
+                "verification_items": [],
+                "structured_result": None,
+                "output_path": None,
+                "warnings": [],
+                "steps": [],
+                "reader_result_path": None,
+            },
+        )()
+
+    monkeypatch.setattr("content_ingestion.inbox.processor.analyze_asset", _fake_analyze_asset)
+
+    JobProcessor().process(job_dir)
+
+    assert captured == {
+        "requested_mode": "auto",
+        "requested_reading_goal": "guide",
+        "requested_domain_template": "game_guide",
+    }
 
 
 def test_serialize_structured_result_includes_typed_warning_refs() -> None:

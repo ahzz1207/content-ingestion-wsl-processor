@@ -109,6 +109,8 @@ class JobProcessor:
             asset=asset,
             settings=self.settings,
             requested_mode=str(metadata.get("requested_mode") or "auto"),
+            requested_reading_goal=str(metadata.get("requested_reading_goal") or "").strip() or None,
+            requested_domain_template=str(metadata.get("requested_domain_template") or "").strip() or None,
         )
         asset.summary = llm_analysis.summary or asset.summary
         asset.structured_result = llm_analysis.structured_result

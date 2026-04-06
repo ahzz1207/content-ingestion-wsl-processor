@@ -1175,6 +1175,136 @@ def test_build_structured_result_builds_generic_review_product_view() -> None:
     assert result.product_view.sections[3].kind == "reservations"
 
 
+def test_build_structured_result_builds_argument_generic_as_full_analysis_brief() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "The piece argues for a policy shift but leaves execution risk unresolved.",
+        "bottom_line": "The argument is directionally persuasive but operationally incomplete.",
+        "content_kind": "analysis",
+        "author_stance": "analytical",
+        "audience_fit": "Readers who want the full argument map",
+        "save_worthy_points": ["Risk is concentrated in implementation."],
+        "author_thesis": "The policy case is credible, but the implementation case is not yet proven.",
+        "evidence_backed_points": [
+            {
+                "id": "kp-1",
+                "title": "Claim one",
+                "details": "The article says the policy addresses the core bottleneck.",
+                "evidence_segment_ids": ["e1"],
+            },
+            {
+                "id": "kp-2",
+                "title": "Claim two",
+                "details": "The article argues current incentives already align with adoption.",
+                "evidence_segment_ids": ["e2"],
+            },
+        ],
+        "interpretive_points": [
+            {
+                "id": "an-1",
+                "statement": "Execution failure would damage the policy's credibility more than its theory.",
+                "kind": "implication",
+                "evidence_segment_ids": ["e2"],
+            }
+        ],
+        "what_is_new": "The piece ties policy success to execution sequencing rather than principle alone.",
+        "tensions": ["The author assumes coordination capacity that is not demonstrated."],
+        "uncertainties": ["Implementation cost remains weakly specified."],
+        "verification_items": [
+            {
+                "id": "ver-1",
+                "claim": "The delivery timeline is realistic.",
+                "status": "partial",
+                "evidence_segment_ids": ["e2"],
+                "rationale": "The article gives milestones but not resource assumptions.",
+                "confidence": 0.62,
+            }
+        ],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="argument",
+            domain_template="generic",
+            route_key="argument.generic",
+            goal_confidence=0.91,
+            domain_confidence=0.0,
+            requested_reading_goal="argument",
+            requested_domain_template=None,
+        ),
+        requested_mode="argument",
+        resolved_mode="argument",
+        mode_confidence=0.91,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "analysis_brief"
+    assert result.product_view.template == "argument.generic"
+    assert [section.kind for section in result.product_view.sections] == [
+        "core_judgment",
+        "main_arguments",
+        "evidence",
+        "tensions",
+        "verification",
+    ]
+
+
+def test_build_structured_result_builds_guide_generic_as_compressed_takeaway_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
+
+    payload = {
+        "core_summary": "This is a dense article about how to navigate the decision quickly.",
+        "bottom_line": "You only need the few moves that materially change the outcome.",
+        "content_kind": "guide",
+        "author_stance": "practical",
+        "audience_fit": "Readers who want the shortest useful version",
+        "save_worthy_points": ["Ignore low-value background detail."],
+        "guide_goal": "Extract the fastest useful reading of the piece.",
+        "recommended_steps": [
+            "Read the author's central claim first.",
+            "Keep only the evidence that changes the conclusion.",
+            "Ignore rhetorical framing.",
+            "Retain the final practical implication.",
+            "Drop secondary caveats unless they change the decision.",
+            "Skip historical backfill.",
+        ],
+        "tips": ["Treat statistics as support, not the destination."],
+        "pitfalls": ["Do not over-read background sections."],
+        "prerequisites": [],
+        "quick_win": "Reduce the article to one sentence and four retained ideas.",
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="guide",
+            domain_template="generic",
+            route_key="guide.generic",
+            goal_confidence=0.95,
+            domain_confidence=0.0,
+            requested_reading_goal="guide",
+            requested_domain_template=None,
+        ),
+        requested_mode="guide",
+        resolved_mode="guide",
+        mode_confidence=0.95,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view.layout == "practical_guide"
+    assert result.product_view.template == "guide.generic"
+    assert [section.kind for section in result.product_view.sections] == [
+        "one_line_summary",
+        "core_takeaways",
+        "remember_this",
+    ]
+    assert len(result.product_view.sections[1].items) == 5
+
+
 def test_synthesizer_instruction_dispatch_specializes_politics_argument_route() -> None:
     from content_ingestion.pipeline.llm_pipeline import _synthesizer_instructions_for_mode
 
@@ -1308,6 +1438,185 @@ def test_analyze_asset_cleans_invalid_evidence_references(monkeypatch, tmp_path:
     assert result.structured_result.warnings[0].related_refs[1].kind == "evidence_segment"
     assert result.structured_result.warnings[0].related_refs[1].id == "missing-id"
     assert any("unknown evidence id" in warning for warning in result.warnings)
+
+
+def test_validate_structured_result_cleans_invalid_evidence_references_from_editorial_and_product_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import (
+        RoutingDecision,
+        _build_structured_result,
+        _validate_structured_result_evidence,
+    )
+
+    payload = {
+        "core_summary": "Summary",
+        "bottom_line": "Bottom line",
+        "content_kind": "analysis",
+        "author_stance": "critical",
+        "audience_fit": "general readers",
+        "save_worthy_points": [],
+        "author_thesis": "Headline",
+        "evidence_backed_points": [
+            {
+                "id": "kp-1",
+                "title": "Point A",
+                "details": "Details",
+                "evidence_segment_ids": ["missing-id", "e1"],
+            }
+        ],
+        "interpretive_points": [
+            {
+                "id": "an-1",
+                "kind": "implication",
+                "statement": "Statement",
+                "evidence_segment_ids": ["missing-id"],
+            }
+        ],
+        "what_is_new": "What is new",
+        "tensions": ["A tension"],
+        "uncertainties": ["An uncertainty"],
+        "verification_items": [
+            {
+                "id": "ver-1",
+                "claim": "Claim A",
+                "status": "supported",
+                "evidence_segment_ids": ["missing-id"],
+                "rationale": "Model claimed evidence exists",
+                "confidence": 0.9,
+            }
+        ],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="argument",
+            domain_template="politics_public_issue",
+            route_key="argument.politics_public_issue",
+            goal_confidence=0.8,
+            domain_confidence=0.8,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.8,
+    )
+
+    warnings = _validate_structured_result_evidence(result, valid_evidence_segment_ids={"e1"})
+
+    assert warnings
+    assert result.key_points[0].evidence_segment_ids == ["e1"]
+    assert result.analysis_items[0].evidence_segment_ids == []
+    assert result.verification_items[0].evidence_segment_ids == []
+    assert result.verification_items[0].status == "unclear"
+    assert result.editorial is not None
+    assert result.editorial.mode_payload["evidence_backed_points"][0]["evidence_segment_ids"] == ["e1"]
+    assert result.editorial.mode_payload["interpretive_points"][0]["evidence_segment_ids"] == []
+    assert result.editorial.mode_payload["verification_items"][0]["evidence_segment_ids"] == []
+    assert result.editorial.mode_payload["verification_items"][0]["status"] == "unclear"
+    assert result.product_view is not None
+    assert result.product_view.sections[1].items[0]["evidence_segment_ids"] == ["e1"]
+
+
+def test_validate_structured_result_cleans_invalid_evidence_references_when_ids_are_missing_or_duplicated() -> None:
+    from content_ingestion.pipeline.llm_pipeline import (
+        RoutingDecision,
+        _build_structured_result,
+        _validate_structured_result_evidence,
+    )
+
+    payload = {
+        "core_summary": "Summary",
+        "bottom_line": "Bottom line",
+        "content_kind": "analysis",
+        "author_stance": "critical",
+        "audience_fit": "general readers",
+        "save_worthy_points": [],
+        "author_thesis": "Headline",
+        "evidence_backed_points": [
+            {
+                "id": "",
+                "title": "Point A",
+                "details": "Details A",
+                "evidence_segment_ids": ["missing-a", "e1"],
+            },
+            {
+                "id": "",
+                "title": "Point B",
+                "details": "Details B",
+                "evidence_segment_ids": ["missing-b", "e2"],
+            },
+        ],
+        "interpretive_points": [
+            {
+                "id": "dup",
+                "kind": "implication",
+                "statement": "Statement A",
+                "evidence_segment_ids": ["missing-a", "e1"],
+            },
+            {
+                "id": "dup",
+                "kind": "alternative",
+                "statement": "Statement B",
+                "evidence_segment_ids": ["missing-b"],
+            },
+        ],
+        "what_is_new": "What is new",
+        "tensions": ["A tension"],
+        "uncertainties": ["An uncertainty"],
+        "verification_items": [
+            {
+                "id": "",
+                "claim": "Claim A",
+                "status": "supported",
+                "evidence_segment_ids": ["missing-a", "e1"],
+                "rationale": "Model claimed evidence exists",
+                "confidence": 0.9,
+            },
+            {
+                "id": "",
+                "claim": "Claim B",
+                "status": "partial",
+                "evidence_segment_ids": ["missing-b"],
+                "rationale": "Model claimed evidence exists",
+                "confidence": 0.6,
+            },
+        ],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="argument",
+            domain_template="politics_public_issue",
+            route_key="argument.politics_public_issue",
+            goal_confidence=0.8,
+            domain_confidence=0.8,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.8,
+    )
+
+    warnings = _validate_structured_result_evidence(result, valid_evidence_segment_ids={"e1", "e2"})
+
+    assert warnings
+    assert [item.evidence_segment_ids for item in result.key_points] == [["e1"], ["e2"]]
+    assert [item.evidence_segment_ids for item in result.analysis_items] == [["e1"], []]
+    assert [item.evidence_segment_ids for item in result.verification_items] == [["e1"], []]
+    assert [item.status for item in result.verification_items] == ["supported", "unclear"]
+    assert result.editorial is not None
+    assert [item["evidence_segment_ids"] for item in result.editorial.mode_payload["evidence_backed_points"]] == [["e1"], ["e2"]]
+    assert [item["evidence_segment_ids"] for item in result.editorial.mode_payload["interpretive_points"]] == [["e1"], []]
+    assert [item["evidence_segment_ids"] for item in result.editorial.mode_payload["verification_items"]] == [["e1"], []]
+    assert [item["status"] for item in result.editorial.mode_payload["verification_items"]] == ["supported", "unclear"]
+    assert result.product_view is not None
+    key_point_items = result.product_view.sections[1].items
+    assert [item["evidence_segment_ids"] for item in key_point_items] == [["e1"], ["e2"]]
 
 
 def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path: Path) -> None:

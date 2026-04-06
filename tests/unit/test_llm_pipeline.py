@@ -210,7 +210,7 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert result.structured_result.synthesis.what_is_new == "Novel perspective on the topic"
     assert result.structured_result.synthesis.tensions == ["Tension between claim A and claim B"]
     assert result.structured_result.chapter_map[0].id == "ch-1"
-    assert result.requested_reading_goal == "auto"
+    assert result.requested_reading_goal is None
     assert result.resolved_reading_goal == "argument"
     assert result.goal_confidence == 0.82
     assert result.requested_domain_template is None
@@ -218,7 +218,7 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert result.domain_confidence == 0.82
     assert result.route_key == "argument.generic"
     assert result.structured_result.editorial is not None
-    assert result.structured_result.editorial.requested_reading_goal == "auto"
+    assert result.structured_result.editorial.requested_reading_goal is None
     assert result.structured_result.editorial.resolved_reading_goal == "argument"
     assert result.structured_result.editorial.goal_confidence == 0.82
     assert result.structured_result.editorial.resolved_domain_template == "generic"
@@ -231,7 +231,7 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     analysis_result_payload = json.loads((job_dir / "analysis" / "llm" / "analysis_result.json").read_text(encoding="utf-8"))
     assert analysis_result_payload["reader_result_path"] == "analysis/llm/reader_result.json"
     assert analysis_result_payload["synthesizer_result_path"] == "analysis/llm/synthesizer_result.json"
-    assert analysis_result_payload["requested_reading_goal"] == "auto"
+    assert analysis_result_payload["requested_reading_goal"] is None
     assert analysis_result_payload["resolved_reading_goal"] == "argument"
     assert analysis_result_payload["goal_confidence"] == 0.82
     assert analysis_result_payload["requested_domain_template"] is None
@@ -241,7 +241,7 @@ def test_analyze_asset_uses_text_and_multimodal_calls(monkeypatch, tmp_path: Pat
     assert analysis_result_payload["result"]["chapter_map"][0]["id"] == "ch-1"
     assert analysis_result_payload["result"]["synthesis"]["what_is_new"] == "Novel perspective on the topic"
     assert analysis_result_payload["result"]["synthesis"]["tensions"] == ["Tension between claim A and claim B"]
-    assert analysis_result_payload["result"]["editorial"]["requested_reading_goal"] == "auto"
+    assert analysis_result_payload["result"]["editorial"]["requested_reading_goal"] is None
     assert analysis_result_payload["result"]["editorial"]["resolved_reading_goal"] == "argument"
     assert analysis_result_payload["result"]["editorial"]["goal_confidence"] == 0.82
     assert analysis_result_payload["result"]["editorial"]["resolved_domain_template"] == "generic"
@@ -317,6 +317,7 @@ def test_resolve_routing_honors_explicit_reading_goal_override() -> None:
     assert route.domain_template == "generic"
     assert route.route_key == "guide.generic"
     assert route.goal_confidence == 1.0
+    assert route.requested_reading_goal == "guide"
 
 
 def test_resolve_routing_honors_explicit_domain_override_when_provided() -> None:
@@ -397,6 +398,243 @@ def test_resolve_routing_preserves_explicit_zero_confidence() -> None:
     assert route.route_key == "review.generic"
 
 
+def test_analyze_asset_preserves_legacy_v1_routing_in_result_metadata(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1-mini")
+    settings = load_settings()
+
+    class _LegacyRoutingResponses:
+        def create(self, **kwargs):
+            schema_name = kwargs.get("text", {}).get("format", {}).get("name", "")
+            if schema_name == "reader_analysis":
+                payload = {
+                    "document_type": "tutorial",
+                    "thesis": "Demo thesis",
+                    "chapter_map": [
+                        {
+                            "id": "ch-1",
+                            "title": "Chapter 1",
+                            "summary": "Chapter 1 summary",
+                            "block_ids": ["b1"],
+                            "role": "argument",
+                            "weight": "high",
+                        }
+                    ],
+                    "argument_skeleton": [
+                        {
+                            "id": "arg-1",
+                            "claim": "Main claim",
+                            "chapter_id": "ch-1",
+                            "claim_type": "fact",
+                        }
+                    ],
+                    "content_signals": {
+                        "evidence_density": "medium",
+                        "rhetoric_density": "low",
+                        "has_novel_claim": False,
+                        "has_data": False,
+                        "estimated_depth": "medium",
+                    },
+                    "suggested_mode": "guide",
+                    "mode_confidence": 0.64,
+                }
+            else:
+                payload = {
+                    "core_summary": "Guide summary",
+                    "bottom_line": "Try the first step",
+                    "content_kind": "tutorial",
+                    "author_stance": "explanatory",
+                    "audience_fit": "new readers",
+                    "save_worthy_points": ["Start simple"],
+                    "guide_goal": "learn the flow",
+                    "recommended_steps": ["Step 1", "Step 2"],
+                    "tips": ["Tip A"],
+                    "pitfalls": ["Pitfall A"],
+                    "prerequisites": ["Prereq A"],
+                    "quick_win": "Begin with Step 1",
+                }
+            return type("Response", (), {"output_text": json.dumps(payload, ensure_ascii=False)})()
+
+    class _LegacyRoutingClient:
+        def __init__(self) -> None:
+            self.responses = _LegacyRoutingResponses()
+
+    monkeypatch.setattr("content_ingestion.pipeline.llm_pipeline.openai_sdk_available", lambda: True)
+    monkeypatch.setattr("content_ingestion.pipeline.llm_pipeline._create_client", lambda settings: _LegacyRoutingClient())
+
+    asset = ContentAsset(
+        source_platform="generic",
+        source_url="https://example.com/tutorial",
+        title="Demo Tutorial",
+        content_text="hello",
+        blocks=[ContentBlock(id="b1", kind="paragraph", text="Paragraph 1")],
+    )
+
+    result = analyze_asset(job_dir=tmp_path, asset=asset, settings=settings)
+
+    assert result.status == "pass"
+    assert result.requested_mode == "auto"
+    assert result.resolved_mode == "guide"
+    assert result.mode_confidence == 0.64
+    assert result.requested_reading_goal is None
+    assert result.resolved_reading_goal == "guide"
+    assert result.goal_confidence == 0.64
+    assert result.requested_domain_template is None
+    assert result.resolved_domain_template == "generic"
+    assert result.domain_confidence == 0.0
+    assert result.route_key == "guide.generic"
+    assert result.structured_result is not None
+    assert result.structured_result.editorial is not None
+    assert result.structured_result.editorial.requested_mode == "auto"
+    assert result.structured_result.editorial.resolved_mode == "guide"
+    assert result.structured_result.editorial.mode_confidence == 0.64
+    assert result.structured_result.editorial.requested_reading_goal is None
+    assert result.structured_result.editorial.resolved_reading_goal == "guide"
+    assert result.structured_result.editorial.goal_confidence == 0.64
+    assert result.structured_result.editorial.resolved_domain_template == "generic"
+    assert result.structured_result.editorial.route_key == "guide.generic"
+    analysis_result_payload = json.loads((tmp_path / "analysis" / "llm" / "analysis_result.json").read_text(encoding="utf-8"))
+    assert analysis_result_payload["resolved_mode"] == "guide"
+    assert analysis_result_payload["mode_confidence"] == 0.64
+    assert analysis_result_payload["resolved_reading_goal"] == "guide"
+    assert analysis_result_payload["goal_confidence"] == 0.64
+    assert analysis_result_payload["resolved_domain_template"] == "generic"
+    assert analysis_result_payload["route_key"] == "guide.generic"
+    assert analysis_result_payload["result"]["editorial"]["resolved_mode"] == "guide"
+    assert analysis_result_payload["result"]["editorial"]["mode_confidence"] == 0.64
+    assert analysis_result_payload["result"]["editorial"]["resolved_reading_goal"] == "guide"
+    assert analysis_result_payload["result"]["editorial"]["goal_confidence"] == 0.64
+    assert analysis_result_payload["result"]["editorial"]["route_key"] == "guide.generic"
+
+
+def test_analyze_asset_bridges_narrative_route_to_legacy_argument_mode(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1-mini")
+    settings = load_settings()
+
+    class _NarrativeRoutingResponses:
+        def create(self, **kwargs):
+            schema_name = kwargs.get("text", {}).get("format", {}).get("name", "")
+            if schema_name == "reader_analysis":
+                payload = {
+                    "document_type": "article",
+                    "thesis": "Demo thesis",
+                    "chapter_map": [
+                        {
+                            "id": "ch-1",
+                            "title": "Chapter 1",
+                            "summary": "Chapter 1 summary",
+                            "block_ids": ["b1"],
+                            "role": "setup",
+                            "weight": "high",
+                        }
+                    ],
+                    "argument_skeleton": [
+                        {
+                            "id": "arg-1",
+                            "claim": "Main claim",
+                            "chapter_id": "ch-1",
+                            "claim_type": "interpretation",
+                        }
+                    ],
+                    "content_signals": {
+                        "evidence_density": "low",
+                        "rhetoric_density": "medium",
+                        "has_novel_claim": False,
+                        "has_data": False,
+                        "estimated_depth": "medium",
+                    },
+                    "suggested_reading_goal": "narrative",
+                    "goal_confidence": 0.91,
+                    "suggested_domain_template": "personal_narrative",
+                    "domain_confidence": 0.91,
+                }
+            else:
+                payload = {
+                    "core_summary": "Narrative summary",
+                    "bottom_line": "Personal takeaway",
+                    "content_kind": "article",
+                    "author_stance": "mixed",
+                    "audience_fit": "general readers",
+                    "save_worthy_points": ["Point A"],
+                    "author_thesis": "Narrative headline",
+                    "evidence_backed_points": [
+                        {
+                            "id": "kp-1",
+                            "title": "Point A",
+                            "details": "Point A details",
+                            "evidence_segment_ids": [],
+                        }
+                    ],
+                    "interpretive_points": [
+                        {
+                            "id": "an-1",
+                            "kind": "implication",
+                            "statement": "Point A",
+                            "evidence_segment_ids": [],
+                        }
+                    ],
+                    "what_is_new": "A personal angle",
+                    "tensions": [],
+                    "uncertainties": [],
+                    "verification_items": [],
+                }
+            return type("Response", (), {"output_text": json.dumps(payload, ensure_ascii=False)})()
+
+    class _NarrativeRoutingClient:
+        def __init__(self) -> None:
+            self.responses = _NarrativeRoutingResponses()
+
+    monkeypatch.setattr("content_ingestion.pipeline.llm_pipeline.openai_sdk_available", lambda: True)
+    monkeypatch.setattr("content_ingestion.pipeline.llm_pipeline._create_client", lambda settings: _NarrativeRoutingClient())
+
+    asset = ContentAsset(
+        source_platform="generic",
+        source_url="https://example.com/story",
+        title="Demo Story",
+        content_text="hello",
+        blocks=[ContentBlock(id="b1", kind="paragraph", text="Paragraph 1")],
+    )
+
+    result = analyze_asset(job_dir=tmp_path, asset=asset, settings=settings)
+
+    assert result.status == "pass"
+    assert result.requested_mode == "auto"
+    assert result.requested_reading_goal is None
+    assert result.resolved_reading_goal == "narrative"
+    assert result.goal_confidence == 0.91
+    assert result.resolved_domain_template == "personal_narrative"
+    assert result.domain_confidence == 0.91
+    assert result.route_key == "narrative.personal_narrative"
+    assert result.resolved_mode == "argument"
+    assert result.mode_confidence == 0.91
+    assert result.structured_result is not None
+    assert result.structured_result.editorial is not None
+    assert result.structured_result.editorial.requested_reading_goal is None
+    assert result.structured_result.editorial.resolved_reading_goal == "narrative"
+    assert result.structured_result.editorial.goal_confidence == 0.91
+    assert result.structured_result.editorial.resolved_domain_template == "personal_narrative"
+    assert result.structured_result.editorial.domain_confidence == 0.91
+    assert result.structured_result.editorial.route_key == "narrative.personal_narrative"
+    assert result.structured_result.editorial.resolved_mode == "argument"
+    analysis_result_payload = json.loads((tmp_path / "analysis" / "llm" / "analysis_result.json").read_text(encoding="utf-8"))
+    assert analysis_result_payload["requested_reading_goal"] is None
+    assert analysis_result_payload["resolved_reading_goal"] == "narrative"
+    assert analysis_result_payload["goal_confidence"] == 0.91
+    assert analysis_result_payload["resolved_domain_template"] == "personal_narrative"
+    assert analysis_result_payload["domain_confidence"] == 0.91
+    assert analysis_result_payload["route_key"] == "narrative.personal_narrative"
+    assert analysis_result_payload["resolved_mode"] == "argument"
+    assert analysis_result_payload["mode_confidence"] == 0.91
+    assert analysis_result_payload["result"]["editorial"]["requested_reading_goal"] is None
+    assert analysis_result_payload["result"]["editorial"]["resolved_reading_goal"] == "narrative"
+    assert analysis_result_payload["result"]["editorial"]["goal_confidence"] == 0.91
+    assert analysis_result_payload["result"]["editorial"]["resolved_domain_template"] == "personal_narrative"
+    assert analysis_result_payload["result"]["editorial"]["domain_confidence"] == 0.91
+    assert analysis_result_payload["result"]["editorial"]["route_key"] == "narrative.personal_narrative"
+    assert analysis_result_payload["result"]["editorial"]["resolved_mode"] == "argument"
+
+
 def test_resolve_routing_falls_back_to_argument_when_goal_invalid() -> None:
     from content_ingestion.pipeline.llm_pipeline import _resolve_routing
 
@@ -471,6 +709,24 @@ def test_resolve_routing_uses_requested_mode_as_compatibility_bridge() -> None:
     assert route.reading_goal == "guide"
     assert route.domain_template == "game_guide"
     assert route.route_key == "guide.game_guide"
+    assert route.requested_reading_goal is None
+
+
+def test_resolve_routing_keeps_requested_mode_separate_from_requested_reading_goal() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_routing
+
+    route = _resolve_routing(
+        requested_mode="review",
+        reader_payload={
+            "suggested_reading_goal": "argument",
+            "suggested_domain_template": "generic",
+            "goal_confidence": 0.94,
+            "domain_confidence": 0.94,
+        },
+    )
+
+    assert route.reading_goal == "review"
+    assert route.requested_reading_goal is None
 
 
 def test_editorial_result_dataclasses_exist() -> None:
@@ -498,7 +754,7 @@ def test_editorial_result_dataclasses_exist() -> None:
 
 
 def test_build_structured_result_argument_mode_builds_editorial() -> None:
-    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
 
     payload = {
         "core_summary": "summary",
@@ -523,6 +779,15 @@ def test_build_structured_result_argument_mode_builds_editorial() -> None:
     result = _build_structured_result(
         payload,
         reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="argument",
+            domain_template="generic",
+            route_key="argument.generic",
+            goal_confidence=0.72,
+            domain_confidence=0.61,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
         requested_mode="auto",
         resolved_mode="argument",
         mode_confidence=0.72,
@@ -539,7 +804,7 @@ def test_build_structured_result_argument_mode_builds_editorial() -> None:
 
 
 def test_build_structured_result_guide_mode_builds_editorial() -> None:
-    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
 
     payload = {
         "core_summary": "guide summary",
@@ -559,6 +824,15 @@ def test_build_structured_result_guide_mode_builds_editorial() -> None:
     result = _build_structured_result(
         payload,
         reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="guide",
+            domain_template="generic",
+            route_key="guide.generic",
+            goal_confidence=1.0,
+            domain_confidence=0.0,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
         requested_mode="guide",
         resolved_mode="guide",
         mode_confidence=1.0,
@@ -571,7 +845,7 @@ def test_build_structured_result_guide_mode_builds_editorial() -> None:
 
 
 def test_build_structured_result_review_mode_builds_editorial() -> None:
-    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+    from content_ingestion.pipeline.llm_pipeline import RoutingDecision, _build_structured_result
 
     payload = {
         "core_summary": "review summary",
@@ -591,6 +865,15 @@ def test_build_structured_result_review_mode_builds_editorial() -> None:
     result = _build_structured_result(
         payload,
         reader_payload={"chapter_map": []},
+        routing=RoutingDecision(
+            reading_goal="review",
+            domain_template="generic",
+            route_key="review.generic",
+            goal_confidence=1.0,
+            domain_confidence=0.0,
+            requested_reading_goal=None,
+            requested_domain_template=None,
+        ),
         requested_mode="review",
         resolved_mode="review",
         mode_confidence=1.0,

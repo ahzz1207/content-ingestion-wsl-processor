@@ -332,7 +332,7 @@ class RoutingDecision:
     route_key: str
     goal_confidence: float
     domain_confidence: float
-    requested_reading_goal: str
+    requested_reading_goal: str | None
     requested_domain_template: str | None
 
 
@@ -485,6 +485,7 @@ def analyze_asset(
     structured_result = _build_structured_result(
         text_payload,
         reader_payload=reader_payload,
+        routing=routing,
         requested_mode=requested_mode,
         resolved_mode=resolved_mode,
         mode_confidence=mode_confidence,
@@ -506,6 +507,7 @@ def analyze_asset(
             repaired_result = _build_structured_result(
                 repaired_payload,
                 reader_payload=reader_payload,
+                routing=routing,
                 requested_mode=requested_mode,
                 resolved_mode=resolved_mode,
                 mode_confidence=mode_confidence,
@@ -829,15 +831,24 @@ def _resolve_routing(
     requested_mode: str | None = None,
 ) -> RoutingDecision:
     payload = reader_payload or {}
-    effective_requested_goal = str(requested_reading_goal or requested_mode or "auto").strip() or "auto"
-    if effective_requested_goal in _VALID_READING_GOALS:
-        reading_goal = effective_requested_goal
+    explicit_requested_goal = str(requested_reading_goal or "").strip() or None
+    if explicit_requested_goal in _VALID_READING_GOALS:
+        reading_goal = explicit_requested_goal
+        goal_confidence = 1.0
+    elif requested_mode in _VALID_V1_MODES:
+        reading_goal = requested_mode
         goal_confidence = 1.0
     else:
-        suggested_goal = str(payload.get("suggested_reading_goal") or "").strip()
+        suggested_goal = str(
+            payload.get("suggested_reading_goal") or payload.get("suggested_mode") or ""
+        ).strip()
         if suggested_goal in _VALID_READING_GOALS:
             reading_goal = suggested_goal
-            goal_confidence = _coerce_confidence(payload.get("goal_confidence")) or 0.5
+            goal_confidence = _coerce_confidence(payload.get("goal_confidence"))
+            if goal_confidence is None:
+                goal_confidence = _coerce_confidence(payload.get("mode_confidence"))
+            if goal_confidence is None:
+                goal_confidence = 0.5
         else:
             reading_goal = "argument"
             goal_confidence = 0.5
@@ -848,7 +859,9 @@ def _resolve_routing(
     else:
         suggested_domain = str(payload.get("suggested_domain_template") or "").strip()
         candidate_domain = suggested_domain if suggested_domain in _VALID_DOMAIN_TEMPLATES else "generic"
-        domain_confidence = _coerce_confidence(payload.get("domain_confidence")) or 0.0
+        domain_confidence = _coerce_confidence(payload.get("domain_confidence"))
+        if domain_confidence is None:
+            domain_confidence = 0.0
         if domain_confidence < _DOMAIN_CONFIDENCE_THRESHOLD:
             candidate_domain = "generic"
 
@@ -863,7 +876,7 @@ def _resolve_routing(
         route_key=f"{reading_goal}.{domain_template}",
         goal_confidence=goal_confidence,
         domain_confidence=domain_confidence,
-        requested_reading_goal=effective_requested_goal,
+        requested_reading_goal=explicit_requested_goal,
         requested_domain_template=requested_domain_template,
     )
 
@@ -1025,6 +1038,7 @@ def _build_structured_result(
     payload: dict[str, object],
     *,
     reader_payload: dict[str, object] | None = None,
+    routing: RoutingDecision,
     requested_mode: str,
     resolved_mode: str,
     mode_confidence: float | None,
@@ -1051,7 +1065,6 @@ def _build_structured_result(
         save_worthy_points=[str(item).strip() for item in payload.get("save_worthy_points", []) if str(item).strip()],
     )
     mode_payload = _build_editorial_mode_payload(resolved_mode, payload)
-    routing = _resolve_routing(requested_mode=requested_mode, reader_payload=reader_payload)
     return StructuredResult(
         content_kind=content_kind,
         author_stance=author_stance,

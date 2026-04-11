@@ -9,15 +9,17 @@ from typing import Any
 
 from content_ingestion.core.config import Settings
 from content_ingestion.core.models import (
-    VisualFinding,
     AnalysisItem,
     ChapterEntry,
     ContentAsset,
+    EditorialBase,
+    EditorialResult,
     KeyPoint,
     RelatedRef,
     ResultSummary,
     StructuredResult,
     SynthesisResult,
+    VisualFinding,
     VerificationItem,
     WarningItem,
 )
@@ -29,20 +31,44 @@ from content_ingestion.pipeline.llm_contract import (
 )
 
 
-TEXT_ANALYSIS_SCHEMA = {
+_SHARED_EDITORIAL_SCHEMA_PROPS = {
+    "core_summary": {"type": "string"},
+    "bottom_line": {"type": "string"},
+    "content_kind": {"type": "string"},
+    "author_stance": {"type": "string"},
+    "audience_fit": {"type": "string"},
+    "save_worthy_points": {"type": "array", "items": {"type": "string"}},
+}
+_SHARED_EDITORIAL_REQUIRED = [
+    "core_summary",
+    "bottom_line",
+    "content_kind",
+    "author_stance",
+    "audience_fit",
+    "save_worthy_points",
+]
+
+_VERIFICATION_ITEM_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "summary": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "headline": {"type": "string"},
-                "short_text": {"type": "string"},
-            },
-            "required": ["headline", "short_text"],
-        },
-        "key_points": {
+        "id": {"type": "string"},
+        "claim": {"type": "string"},
+        "status": {"type": "string", "enum": ["supported", "partial", "unsupported", "unclear"]},
+        "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
+        "rationale": {"type": ["string", "null"]},
+        "confidence": {"type": ["number", "null"]},
+    },
+    "required": ["id", "claim", "status", "evidence_segment_ids", "rationale", "confidence"],
+}
+
+ARGUMENT_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "author_thesis": {"type": "string"},
+        "evidence_backed_points": {
             "type": "array",
             "items": {
                 "type": "object",
@@ -56,54 +82,84 @@ TEXT_ANALYSIS_SCHEMA = {
                 "required": ["id", "title", "details", "evidence_segment_ids"],
             },
         },
-        "analysis_items": {
+        "interpretive_points": {
             "type": "array",
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
                     "id": {"type": "string"},
-                    "kind": {"type": "string"},
                     "statement": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["implication", "alternative"]},
                     "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": ["number", "null"]},
                 },
-                "required": ["id", "kind", "statement", "evidence_segment_ids", "confidence"],
+                "required": ["id", "statement", "kind", "evidence_segment_ids"],
             },
         },
-        "verification_items": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "id": {"type": "string"},
-                    "claim": {"type": "string"},
-                    "status": {"type": "string", "enum": ["supported", "partial", "unsupported", "unclear"]},
-                    "evidence_segment_ids": {"type": "array", "items": {"type": "string"}},
-                    "rationale": {"type": ["string", "null"]},
-                    "confidence": {"type": ["number", "null"]},
-                },
-                "required": ["id", "claim", "status", "evidence_segment_ids", "rationale", "confidence"],
-            },
-        },
-        "content_kind": {"type": "string"},
-        "author_stance": {"type": "string"},
-        "synthesis": {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "final_answer": {"type": "string"},
-                "what_is_new": {"type": "string"},
-                "tensions": {"type": "array", "items": {"type": "string"}},
-                "next_steps": {"type": "array", "items": {"type": "string"}},
-                "open_questions": {"type": "array", "items": {"type": "string"}},
-            },
-            "required": ["final_answer", "what_is_new", "tensions", "next_steps", "open_questions"],
-        },
+        "what_is_new": {"type": "string"},
+        "tensions": {"type": "array", "items": {"type": "string"}},
+        "uncertainties": {"type": "array", "items": {"type": "string"}},
+        "verification_items": {"type": "array", "items": _VERIFICATION_ITEM_SCHEMA},
     },
-    "required": ["content_kind", "author_stance", "summary", "key_points", "analysis_items", "verification_items", "synthesis"],
+    "required": [
+        *_SHARED_EDITORIAL_REQUIRED,
+        "author_thesis",
+        "evidence_backed_points",
+        "interpretive_points",
+        "what_is_new",
+        "tensions",
+        "uncertainties",
+        "verification_items",
+    ],
 }
+
+GUIDE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "guide_goal": {"type": "string"},
+        "recommended_steps": {"type": "array", "items": {"type": "string"}},
+        "tips": {"type": "array", "items": {"type": "string"}},
+        "pitfalls": {"type": "array", "items": {"type": "string"}},
+        "prerequisites": {"type": "array", "items": {"type": "string"}},
+        "quick_win": {"type": ["string", "null"]},
+    },
+    "required": [
+        *_SHARED_EDITORIAL_REQUIRED,
+        "guide_goal",
+        "recommended_steps",
+        "tips",
+        "pitfalls",
+        "prerequisites",
+        "quick_win",
+    ],
+}
+
+REVIEW_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "overall_judgment": {"type": "string"},
+        "highlights": {"type": "array", "items": {"type": "string"}},
+        "style_and_mood": {"type": "string"},
+        "what_stands_out": {"type": "string"},
+        "who_it_is_for": {"type": "string"},
+        "reservation_points": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        *_SHARED_EDITORIAL_REQUIRED,
+        "overall_judgment",
+        "highlights",
+        "style_and_mood",
+        "what_stands_out",
+        "who_it_is_for",
+        "reservation_points",
+    ],
+}
+
+TEXT_ANALYSIS_SCHEMA = ARGUMENT_ANALYSIS_SCHEMA
 
 READER_SCHEMA = {
     "type": "object",
@@ -153,8 +209,18 @@ READER_SCHEMA = {
             },
             "required": ["evidence_density", "rhetoric_density", "has_novel_claim", "has_data", "estimated_depth"],
         },
+        "suggested_mode": {"type": "string", "enum": ["argument", "guide", "review"]},
+        "mode_confidence": {"type": "number"},
     },
-    "required": ["document_type", "thesis", "chapter_map", "argument_skeleton", "content_signals"],
+    "required": [
+        "document_type",
+        "thesis",
+        "chapter_map",
+        "argument_skeleton",
+        "content_signals",
+        "suggested_mode",
+        "mode_confidence",
+    ],
 }
 
 MULTIMODAL_SCHEMA = {
@@ -222,10 +288,27 @@ class LlmAnalysisResult:
     output_path: str | None = None
     reader_result_path: str | None = None
     synthesizer_result_path: str | None = None
+    requested_mode: str = "auto"
+    resolved_mode: str | None = None
+    mode_confidence: float | None = None
     request_artifacts: dict[str, str] = field(default_factory=dict)
 
 
-def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> LlmAnalysisResult:
+_VALID_V1_MODES = {"argument", "guide", "review"}
+_MODE_SCHEMA = {
+    "argument": ARGUMENT_ANALYSIS_SCHEMA,
+    "guide": GUIDE_ANALYSIS_SCHEMA,
+    "review": REVIEW_ANALYSIS_SCHEMA,
+}
+
+
+def analyze_asset(
+    *,
+    job_dir: Path,
+    asset: ContentAsset,
+    settings: Settings,
+    requested_mode: str = "auto",
+) -> LlmAnalysisResult:
     text_envelope = build_text_analysis_envelope(
         asset=asset,
         job_dir=job_dir,
@@ -314,6 +397,17 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
     )
     result.reader_result_path = reader_result_path.relative_to(job_dir).as_posix()
     result.steps.append({"name": "llm_reader_pass", "status": "success", "details": settings.analysis_model})
+    resolved_mode, mode_confidence = _resolve_mode(requested_mode, reader_payload)
+    result.requested_mode = requested_mode
+    result.resolved_mode = resolved_mode
+    result.mode_confidence = mode_confidence
+    result.steps.append(
+        {
+            "name": "mode_routing",
+            "status": "success",
+            "details": f"{requested_mode} -> {resolved_mode} ({mode_confidence:.2f})",
+        }
+    )
 
     # === Synthesizer Pass ===
     synthesizer_envelope = build_synthesizer_envelope(
@@ -333,10 +427,10 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
     text_payload = _call_structured_response(
         client=client,
         model=settings.analysis_model,
-        instructions=_synthesizer_instructions(),
+        instructions=_synthesizer_instructions_for_mode(resolved_mode),
         input_payload=synthesizer_envelope.to_model_input(),
         schema_name="content_analysis",
-        schema=TEXT_ANALYSIS_SCHEMA,
+        schema=_MODE_SCHEMA.get(resolved_mode, ARGUMENT_ANALYSIS_SCHEMA),
     )
     synthesizer_result_path = analysis_dir / "synthesizer_result.json"
     synthesizer_result_path.write_text(
@@ -345,7 +439,13 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
     )
     result.synthesizer_result_path = synthesizer_result_path.relative_to(job_dir).as_posix()
     result.steps.append({"name": "llm_synthesizer_pass", "status": "success", "details": settings.analysis_model})
-    structured_result = _build_structured_result(text_payload, reader_payload=reader_payload)
+    structured_result = _build_structured_result(
+        text_payload,
+        reader_payload=reader_payload,
+        requested_mode=requested_mode,
+        resolved_mode=resolved_mode,
+        mode_confidence=mode_confidence,
+    )
     valid_evidence_segment_ids = {segment.id for segment in asset.evidence_segments}
     validation_warnings = _validate_structured_result_evidence(
         structured_result,
@@ -360,7 +460,13 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
             validation_warnings=[item.message for item in validation_warnings],
         )
         if repaired_payload is not None:
-            repaired_result = _build_structured_result(repaired_payload, reader_payload=reader_payload)
+            repaired_result = _build_structured_result(
+                repaired_payload,
+                reader_payload=reader_payload,
+                requested_mode=requested_mode,
+                resolved_mode=resolved_mode,
+                mode_confidence=mode_confidence,
+            )
             repaired_warnings = _validate_structured_result_evidence(
                 repaired_result,
                 valid_evidence_segment_ids=valid_evidence_segment_ids,
@@ -468,6 +574,9 @@ def analyze_asset(*, job_dir: Path, asset: ContentAsset, settings: Settings) -> 
                 "multimodal_input_modality": result.multimodal_input_modality,
                 "task_intent": result.task_intent,
                 "skip_reason": result.skip_reason,
+                "requested_mode": result.requested_mode,
+                "resolved_mode": result.resolved_mode,
+                "mode_confidence": result.mode_confidence,
                 "reader_result_path": result.reader_result_path,
                 "synthesizer_result_path": result.synthesizer_result_path,
                 "request_artifacts": result.request_artifacts,
@@ -631,6 +740,146 @@ GENERAL RULES:
 def _analysis_instructions() -> str:
     return """You are a critical-thinking analyst. Analyze the provided content following four goals exactly.
 
+GOAL 1 - OVERVIEW
+Identify the central topic and the author's core position. Express this as a precise headline and one sentence capturing the author's core claim. Stay grounded in what the author actually says.
+Also identify:
+- content_kind: the type of content (choose one: article, opinion, analysis, report, interview, tutorial, review, news)
+- author_stance: the author's rhetorical posture (choose one: objective, advocacy, critical, skeptical, promotional, explanatory, mixed)
+
+GOAL 2 - VIEWPOINTS
+Extract every distinct argument or claim the author makes. Aim for 5 to 10 viewpoints. For each:
+- Write a concise title naming the argument.
+- Write a detailed explanation of 3 to 5 sentences capturing the author's reasoning, supporting context, and implication.
+Evidence annotation is secondary: never shorten an explanation to attach evidence IDs. If no evidence segment matches, use an empty list.
+
+GOAL 3 - CRITICAL CHECK
+Identify claims that are questionable, unsupported, or in tension with established knowledge. For each:
+- State the exact claim.
+- Assess its status: supported / partial / unsupported / unclear.
+- Provide a rationale explaining your assessment.
+Only flag claims that genuinely merit scrutiny. Do not manufacture doubts about well-supported statements.
+
+GOAL 4 - DIVERGENT THINKING
+Generate non-obvious implications and alternative perspectives the content raises but does not address. Produce at least 3 items. Each must be labeled:
+- "implication": a logical consequence of the author's position not explicitly stated.
+- "alternative": a different reading, counter-argument, or perspective that reframes the author's position.
+Do not restate the author's content. Add analytical value beyond what is on the page.
+
+GENERAL RULES
+- Use only evidence segment IDs that appear in the evidence_segments list. Never invent IDs.
+- If no segment matches, use an empty evidence_segment_ids list.
+- Do not apply word limits to any field.
+- All analysis_items must have kind equal to "implication" or "alternative". No other values are valid."""
+
+
+def _resolve_mode(requested_mode: str, reader_payload: dict[str, object]) -> tuple[str, float]:
+    if requested_mode in _VALID_V1_MODES:
+        return requested_mode, 1.0
+    suggested = str(reader_payload.get("suggested_mode") or "").strip()
+    confidence = float(reader_payload.get("mode_confidence") or 0.5)
+    if suggested in _VALID_V1_MODES:
+        return suggested, confidence
+    return "argument", 0.5
+
+
+def _reader_instructions() -> str:
+    return """You are a structural analyst. Your only job is to identify the shape of the content and suggest the best reading mode.
+
+DO NOT extract opinions, write summaries, or make quality judgments.
+
+YOUR TASKS:
+1. DOCUMENT TYPE - Classify the content type.
+2. THESIS - State the author's core claim in 1-2 sentences based strictly on the text.
+3. CHAPTER MAP - Identify 3-8 semantic sections. For each section:
+   - summary: 1-2 sentences capturing what this section actually says.
+   - block_ids: the block id values from the input that belong to this section.
+   - role: setup / argument / evidence / counterpoint / conclusion / background.
+   - weight: high / medium / low.
+4. ARGUMENT SKELETON - For each chapter, state the main claim.
+   - claim_type: fact / interpretation / implication / rhetoric.
+5. CONTENT SIGNALS - Signal properties to guide downstream analysis.
+6. MODE SUGGESTION - Choose the best v1 analysis mode:
+   - argument: commentary, issue analysis, debate, opinion, macro reading
+   - guide: tutorial, walkthrough, advice, how-to, practical instructions
+   - review: recommendation, curation, taste judgment, exhibition/album/product review
+   Set mode_confidence between 0.0 and 1.0.
+"""
+
+
+def _synthesizer_instructions_argument() -> str:
+    return """You are a critical analyst producing an argument-focused editorial result.
+Use the Reader output to organize your synthesis instead of re-reading every block equally.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- author_thesis
+- evidence_backed_points
+- interpretive_points
+- what_is_new
+- tensions
+- uncertainties
+- verification_items
+
+Rules:
+- Use only evidence_segment_ids from the evidence_segments list.
+- Do not invent evidence ids.
+- Keep interpretive points separate from evidence-backed points."""
+
+
+def _synthesizer_instructions_guide() -> str:
+    return """You are an editor producing a practical guide-oriented result.
+Focus on usability, sequence, and practical value.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- guide_goal
+- recommended_steps
+- tips
+- pitfalls
+- prerequisites
+- quick_win"""
+
+
+def _synthesizer_instructions_review() -> str:
+    return """You are an editor producing a recommendation/review-oriented result.
+Focus on judgment, highlights, style, and audience fit.
+
+Required fields:
+- core_summary
+- bottom_line
+- content_kind
+- author_stance
+- audience_fit
+- save_worthy_points
+- overall_judgment
+- highlights
+- style_and_mood
+- what_stands_out
+- who_it_is_for
+- reservation_points"""
+
+
+def _synthesizer_instructions_for_mode(resolved_mode: str) -> str:
+    if resolved_mode == "guide":
+        return _synthesizer_instructions_guide()
+    if resolved_mode == "review":
+        return _synthesizer_instructions_review()
+    return _synthesizer_instructions_argument()
+
+
+def _analysis_instructions() -> str:
+    return """You are a critical-thinking analyst. Analyze the provided content following four goals exactly.
+
 GOAL 1 — OVERVIEW
 Identify the central topic and the author's core position. Express this as a precise headline and one sentence capturing the author's core claim. Stay grounded in what the author actually says.
 Also identify:
@@ -684,9 +933,10 @@ def _build_structured_result(
     payload: dict[str, object],
     *,
     reader_payload: dict[str, object] | None = None,
-) -> StructuredResult:
-    summary_payload = payload["summary"]
-    synthesis_payload = payload["synthesis"]
+    requested_mode: str,
+    resolved_mode: str,
+    mode_confidence: float | None,
+    ) -> StructuredResult:
     content_kind = str(payload.get("content_kind") or "").strip() or None
     author_stance = str(payload.get("author_stance") or "").strip() or None
     chapter_map = []
@@ -702,51 +952,31 @@ def _build_structured_result(
             )
             for ch in reader_payload.get("chapter_map", [])
         ]
+    editorial_base = EditorialBase(
+        core_summary=str(payload.get("core_summary") or "").strip(),
+        bottom_line=str(payload.get("bottom_line") or "").strip(),
+        audience_fit=str(payload.get("audience_fit") or "").strip(),
+        save_worthy_points=[str(item).strip() for item in payload.get("save_worthy_points", []) if str(item).strip()],
+    )
+    mode_payload = _build_editorial_mode_payload(resolved_mode, payload)
+    product_view = _build_product_view(resolved_mode, editorial_base, mode_payload)
     return StructuredResult(
         content_kind=content_kind,
         author_stance=author_stance,
-        summary=ResultSummary(
-            headline=str(summary_payload["headline"]).strip(),
-            short_text=str(summary_payload["short_text"]).strip(),
-        ),
-        key_points=[
-            KeyPoint(
-                id=str(item["id"]).strip(),
-                title=str(item["title"]).strip(),
-                details=str(item["details"]).strip(),
-                evidence_segment_ids=[str(value).strip() for value in item["evidence_segment_ids"] if str(value).strip()],
-            )
-            for item in payload["key_points"]
-        ],
-        analysis_items=[
-            AnalysisItem(
-                id=str(item["id"]).strip(),
-                kind=str(item["kind"]).strip(),
-                statement=str(item["statement"]).strip(),
-                evidence_segment_ids=[str(value).strip() for value in item["evidence_segment_ids"] if str(value).strip()],
-                confidence=_coerce_confidence(item["confidence"]),
-            )
-            for item in payload["analysis_items"]
-        ],
-        verification_items=[
-            VerificationItem(
-                id=str(item["id"]).strip(),
-                claim=str(item["claim"]).strip(),
-                status=str(item["status"]).strip(),
-                evidence_segment_ids=[str(value).strip() for value in item["evidence_segment_ids"] if str(value).strip()],
-                rationale=str(item["rationale"]).strip() if item["rationale"] is not None else None,
-                confidence=_coerce_confidence(item["confidence"]),
-            )
-            for item in payload["verification_items"]
-        ],
-        synthesis=SynthesisResult(
-            final_answer=str(synthesis_payload["final_answer"]).strip(),
-            next_steps=[str(item).strip() for item in synthesis_payload["next_steps"] if str(item).strip()],
-            open_questions=[str(item).strip() for item in synthesis_payload["open_questions"] if str(item).strip()],
-            what_is_new=str(synthesis_payload.get("what_is_new") or "").strip() or None,
-            tensions=[str(item).strip() for item in synthesis_payload.get("tensions", []) if str(item).strip()],
-        ),
+        summary=_build_legacy_summary(resolved_mode, editorial_base, mode_payload),
+        key_points=_build_legacy_key_points(resolved_mode, mode_payload),
+        analysis_items=_build_legacy_analysis_items(resolved_mode, mode_payload),
+        verification_items=_build_legacy_verification_items(payload if resolved_mode == "argument" else {}),
+        synthesis=_build_legacy_synthesis(resolved_mode, editorial_base, mode_payload),
         chapter_map=chapter_map,
+        editorial=EditorialResult(
+            requested_mode=requested_mode,
+            resolved_mode=resolved_mode,
+            mode_confidence=mode_confidence if mode_confidence is not None else 0.0,
+            base=editorial_base,
+            mode_payload=mode_payload,
+        ),
+        product_view=product_view,
     )
 
 
@@ -848,6 +1078,326 @@ def _serialize_structured_result(result: StructuredResult | None) -> dict[str, o
             for item in result.chapter_map
         ],
         "warnings": [_serialize_warning_item(item) for item in result.warnings],
+        "editorial": _serialize_editorial_result(result.editorial),
+        "product_view": result.product_view,
+    }
+
+
+def _build_product_view(
+    resolved_mode: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> dict[str, object] | None:
+    if resolved_mode != "argument":
+        return None
+
+    hero_title = str(mode_payload.get("author_thesis") or editorial_base.core_summary or editorial_base.bottom_line).strip()
+    hero_dek = editorial_base.core_summary.strip()
+    hero_bottom_line = editorial_base.bottom_line.strip()
+
+    sections: list[dict[str, str]] = []
+
+    for item in mode_payload.get("evidence_backed_points", []):
+        title = str(item.get("title") or "").strip()
+        details = str(item.get("details") or "").strip()
+        if not title or not details:
+            continue
+        sections.append(
+            {
+                "kind": "question_block",
+                "title": title,
+                "body": details,
+            }
+        )
+        if len(sections) == 2:
+            break
+
+    if not sections:
+        fallback_body = hero_title or hero_dek or hero_bottom_line
+        if fallback_body:
+            sections.append(
+                {
+                    "kind": "question_block",
+                    "title": "核心判断是什么？",
+                    "body": fallback_body,
+                }
+            )
+
+    interpretive_points = mode_payload.get("interpretive_points", [])
+    first_interpretive = interpretive_points[0] if interpretive_points else None
+    interpretive_statement = ""
+    if isinstance(first_interpretive, dict):
+        interpretive_statement = str(first_interpretive.get("statement") or "").strip()
+    if interpretive_statement:
+        sections.append(
+            {
+                "kind": "question_block",
+                "title": "接下来会带来什么影响？",
+                "body": interpretive_statement,
+            }
+        )
+    else:
+        what_is_new = str(mode_payload.get("what_is_new") or "").strip()
+        first_tension = next((str(item).strip() for item in mode_payload.get("tensions", []) if str(item).strip()), "")
+        middle_body = what_is_new or first_tension or hero_dek or hero_title
+        if middle_body:
+            sections.append(
+                {
+                    "kind": "question_block",
+                    "title": "最值得注意的点是什么？",
+                    "body": middle_body,
+                }
+            )
+
+    reader_value_bits = [hero_bottom_line]
+    if editorial_base.audience_fit.strip():
+        reader_value_bits.append(editorial_base.audience_fit.strip())
+    if editorial_base.save_worthy_points:
+        reader_value_bits.append(editorial_base.save_worthy_points[0])
+    reader_value_body = " ".join(bit for bit in reader_value_bits if bit).strip()
+    if not reader_value_body:
+        reader_value_body = hero_bottom_line or hero_dek or hero_title
+    sections.append(
+        {
+            "kind": "reader_value",
+            "title": "这对我意味着什么？",
+            "body": reader_value_body,
+        }
+    )
+
+    question_sections = [section for section in sections[:-1] if section["kind"] == "question_block"]
+    if len(question_sections) < 2:
+        filler_body = str(mode_payload.get("what_is_new") or "").strip() or hero_dek or hero_title
+        if filler_body:
+            sections.insert(
+                max(len(sections) - 1, 0),
+                {
+                    "kind": "question_block",
+                    "title": "为什么值得关注？",
+                    "body": filler_body,
+                },
+            )
+
+    sections = sections[:4] + [sections[-1]] if len(sections) > 5 else sections
+
+    return {
+        "hero": {
+            "title": hero_title,
+            "dek": hero_dek,
+            "bottom_line": hero_bottom_line,
+        },
+        "sections": sections,
+        "render_hints": {
+            "layout_family": "analysis_brief",
+        },
+    }
+
+
+def _build_editorial_mode_payload(resolved_mode: str, payload: dict[str, object]) -> dict[str, object]:
+    if resolved_mode == "guide":
+        return {
+            "guide_goal": str(payload.get("guide_goal") or "").strip(),
+            "recommended_steps": [str(item).strip() for item in payload.get("recommended_steps", []) if str(item).strip()],
+            "tips": [str(item).strip() for item in payload.get("tips", []) if str(item).strip()],
+            "pitfalls": [str(item).strip() for item in payload.get("pitfalls", []) if str(item).strip()],
+            "prerequisites": [str(item).strip() for item in payload.get("prerequisites", []) if str(item).strip()],
+            "quick_win": str(payload.get("quick_win") or "").strip() or None,
+        }
+    if resolved_mode == "review":
+        return {
+            "overall_judgment": str(payload.get("overall_judgment") or "").strip(),
+            "highlights": [str(item).strip() for item in payload.get("highlights", []) if str(item).strip()],
+            "style_and_mood": str(payload.get("style_and_mood") or "").strip(),
+            "what_stands_out": str(payload.get("what_stands_out") or "").strip(),
+            "who_it_is_for": str(payload.get("who_it_is_for") or "").strip(),
+            "reservation_points": [str(item).strip() for item in payload.get("reservation_points", []) if str(item).strip()],
+        }
+    return {
+        "author_thesis": str(payload.get("author_thesis") or "").strip(),
+        "evidence_backed_points": [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "title": str(item.get("title") or "").strip(),
+                "details": str(item.get("details") or "").strip(),
+                "evidence_segment_ids": [
+                    str(value).strip()
+                    for value in item.get("evidence_segment_ids", [])
+                    if str(value).strip()
+                ],
+            }
+            for item in payload.get("evidence_backed_points", [])
+        ],
+        "interpretive_points": [
+            {
+                "id": str(item.get("id") or "").strip(),
+                "statement": str(item.get("statement") or "").strip(),
+                "kind": str(item.get("kind") or "").strip(),
+                "evidence_segment_ids": [
+                    str(value).strip()
+                    for value in item.get("evidence_segment_ids", [])
+                    if str(value).strip()
+                ],
+            }
+            for item in payload.get("interpretive_points", [])
+        ],
+        "what_is_new": str(payload.get("what_is_new") or "").strip(),
+        "tensions": [str(item).strip() for item in payload.get("tensions", []) if str(item).strip()],
+        "uncertainties": [str(item).strip() for item in payload.get("uncertainties", []) if str(item).strip()],
+        "verification_items": [
+            _serialize_verification_item(
+                VerificationItem(
+                    id=str(item.get("id") or "").strip(),
+                    claim=str(item.get("claim") or "").strip(),
+                    status=str(item.get("status") or "").strip(),
+                    evidence_segment_ids=[
+                        str(value).strip()
+                        for value in item.get("evidence_segment_ids", [])
+                        if str(value).strip()
+                    ],
+                    rationale=str(item.get("rationale")).strip() if item.get("rationale") is not None else None,
+                    confidence=_coerce_confidence(item.get("confidence")),
+                )
+            )
+            for item in payload.get("verification_items", [])
+        ],
+    }
+
+
+def _build_legacy_summary(
+    resolved_mode: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> ResultSummary:
+    if resolved_mode == "guide":
+        headline = str(mode_payload.get("guide_goal") or editorial_base.core_summary).strip()
+    elif resolved_mode == "review":
+        headline = str(mode_payload.get("overall_judgment") or editorial_base.core_summary).strip()
+    else:
+        headline = str(mode_payload.get("author_thesis") or editorial_base.core_summary).strip()
+    return ResultSummary(
+        headline=headline or editorial_base.core_summary,
+        short_text=editorial_base.core_summary,
+    )
+
+
+def _build_legacy_key_points(resolved_mode: str, mode_payload: dict[str, object]) -> list[KeyPoint]:
+    if resolved_mode == "guide":
+        return [
+            KeyPoint(id=f"step-{index}", title=f"Step {index}", details=str(item).strip())
+            for index, item in enumerate(mode_payload.get("recommended_steps", []), start=1)
+        ]
+    if resolved_mode == "review":
+        return [
+            KeyPoint(id=f"highlight-{index}", title=f"Highlight {index}", details=str(item).strip())
+            for index, item in enumerate(mode_payload.get("highlights", []), start=1)
+        ]
+    return [
+        KeyPoint(
+            id=str(item.get("id") or f"kp-{index}").strip(),
+            title=str(item.get("title") or "").strip(),
+            details=str(item.get("details") or "").strip(),
+            evidence_segment_ids=[
+                str(value).strip()
+                for value in item.get("evidence_segment_ids", [])
+                if str(value).strip()
+            ],
+        )
+        for index, item in enumerate(mode_payload.get("evidence_backed_points", []), start=1)
+    ]
+
+
+def _build_legacy_analysis_items(resolved_mode: str, mode_payload: dict[str, object]) -> list[AnalysisItem]:
+    if resolved_mode == "guide":
+        tips = [
+            AnalysisItem(id=f"tip-{index}", kind="tip", statement=str(item).strip())
+            for index, item in enumerate(mode_payload.get("tips", []), start=1)
+        ]
+        pitfalls = [
+            AnalysisItem(id=f"pitfall-{index}", kind="pitfall", statement=str(item).strip())
+            for index, item in enumerate(mode_payload.get("pitfalls", []), start=1)
+        ]
+        return tips + pitfalls
+    if resolved_mode == "review":
+        items: list[AnalysisItem] = []
+        standout = str(mode_payload.get("what_stands_out") or "").strip()
+        if standout:
+            items.append(AnalysisItem(id="review-standout", kind="highlight", statement=standout))
+        items.extend(
+            AnalysisItem(id=f"reservation-{index}", kind="reservation", statement=str(item).strip())
+            for index, item in enumerate(mode_payload.get("reservation_points", []), start=1)
+        )
+        return items
+    return [
+        AnalysisItem(
+            id=str(item.get("id") or f"analysis-{index}").strip(),
+            kind=str(item.get("kind") or "implication").strip(),
+            statement=str(item.get("statement") or "").strip(),
+            evidence_segment_ids=[
+                str(value).strip()
+                for value in item.get("evidence_segment_ids", [])
+                if str(value).strip()
+            ],
+        )
+        for index, item in enumerate(mode_payload.get("interpretive_points", []), start=1)
+    ]
+
+
+def _build_legacy_verification_items(payload: dict[str, object]) -> list[VerificationItem]:
+    return [
+        VerificationItem(
+            id=str(item.get("id") or "").strip(),
+            claim=str(item.get("claim") or "").strip(),
+            status=str(item.get("status") or "").strip(),
+            evidence_segment_ids=[
+                str(value).strip()
+                for value in item.get("evidence_segment_ids", [])
+                if str(value).strip()
+            ],
+            rationale=str(item.get("rationale")).strip() if item.get("rationale") is not None else None,
+            confidence=_coerce_confidence(item.get("confidence")),
+        )
+        for item in payload.get("verification_items", [])
+    ]
+
+
+def _build_legacy_synthesis(
+    resolved_mode: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> SynthesisResult:
+    what_is_new = str(mode_payload.get("what_is_new") or "").strip() or None
+    tensions = [str(item).strip() for item in mode_payload.get("tensions", []) if str(item).strip()]
+    next_steps: list[str] = []
+    open_questions: list[str] = []
+    if resolved_mode == "guide":
+        next_steps = [str(item).strip() for item in mode_payload.get("prerequisites", []) if str(item).strip()]
+    elif resolved_mode == "review":
+        open_questions = [str(item).strip() for item in mode_payload.get("reservation_points", []) if str(item).strip()]
+    else:
+        open_questions = [str(item).strip() for item in mode_payload.get("uncertainties", []) if str(item).strip()]
+    return SynthesisResult(
+        final_answer=editorial_base.bottom_line,
+        next_steps=next_steps,
+        open_questions=open_questions,
+        what_is_new=what_is_new,
+        tensions=tensions,
+    )
+
+
+def _serialize_editorial_result(editorial: EditorialResult | None) -> dict[str, object] | None:
+    if editorial is None:
+        return None
+    return {
+        "requested_mode": editorial.requested_mode,
+        "resolved_mode": editorial.resolved_mode,
+        "mode_confidence": editorial.mode_confidence,
+        "base": {
+            "core_summary": editorial.base.core_summary,
+            "bottom_line": editorial.base.bottom_line,
+            "audience_fit": editorial.base.audience_fit,
+            "save_worthy_points": editorial.base.save_worthy_points,
+        },
+        "mode_payload": editorial.mode_payload,
     }
 
 

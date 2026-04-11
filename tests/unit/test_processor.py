@@ -181,6 +181,47 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
 
     class _FakeResponses:
         def create(self, **kwargs):
+            schema_name = kwargs.get("text", {}).get("format", {}).get("name", "")
+            if schema_name == "reader_analysis":
+                return type(
+                    "Response",
+                    (),
+                    {
+                        "output_text": json.dumps(
+                            {
+                                "document_type": "article",
+                                "thesis": "Transcript summary",
+                                "chapter_map": [
+                                    {
+                                        "id": "ch-1",
+                                        "title": "Opening",
+                                        "summary": "Summary of the video opening",
+                                        "block_ids": ["b1"],
+                                        "role": "argument",
+                                        "weight": "high",
+                                    }
+                                ],
+                                "argument_skeleton": [
+                                    {
+                                        "id": "arg-1",
+                                        "claim": "Key point",
+                                        "chapter_id": "ch-1",
+                                        "claim_type": "fact",
+                                    }
+                                ],
+                                "content_signals": {
+                                    "evidence_density": "medium",
+                                    "rhetoric_density": "low",
+                                    "has_novel_claim": False,
+                                    "has_data": False,
+                                    "estimated_depth": "medium",
+                                },
+                                "suggested_mode": "argument",
+                                "mode_confidence": 0.88,
+                            }
+                        )
+                    },
+                )()
             if kwargs["model"] == "gpt-4.1-mini":
                 return type(
                     "Response",
@@ -188,11 +229,14 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
                     {
                         "output_text": json.dumps(
                             {
-                                "summary": {
-                                    "headline": "Transcript summary",
-                                    "short_text": "Summarized transcript",
-                                },
-                                "key_points": [
+                                "core_summary": "Summarized transcript",
+                                "bottom_line": "Synthesized answer",
+                                "content_kind": "analysis",
+                                "author_stance": "explanatory",
+                                "audience_fit": "Readers who want a quick macro brief",
+                                "save_worthy_points": ["Key point"],
+                                "author_thesis": "Transcript summary",
+                                "evidence_backed_points": [
                                     {
                                         "id": "kp-1",
                                         "title": "Key point",
@@ -200,15 +244,17 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
                                         "evidence_segment_ids": [transcript_evidence_id],
                                     }
                                 ],
-                                "analysis_items": [
+                                "interpretive_points": [
                                     {
                                         "id": "an-1",
-                                        "kind": "fact",
+                                        "kind": "implication",
                                         "statement": "Point 1",
                                         "evidence_segment_ids": [transcript_evidence_id],
-                                        "confidence": 0.92,
                                     }
                                 ],
+                                "what_is_new": "A concise framing of the transcript",
+                                "tensions": [],
+                                "uncertainties": [],
                                 "verification_items": [
                                     {
                                         "id": "ver-1",
@@ -219,11 +265,6 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
                                         "confidence": 0.9,
                                     }
                                 ],
-                                "synthesis": {
-                                    "final_answer": "Synthesized answer",
-                                    "next_steps": ["Archive"],
-                                    "open_questions": [],
-                                },
                             }
                         )
                     },
@@ -407,6 +448,9 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     assert asset["metadata"]["llm_processing"]["task_intent"] == "summarize_video_from_subtitle_and_whisper_transcript"
     assert asset["metadata"]["llm_processing"]["request_artifacts"]["text"] == "analysis/llm/text_request.json"
     assert asset["metadata"]["llm_processing"]["request_artifacts"]["multimodal"] == "analysis/llm/multimodal_request.json"
+    assert asset["metadata"]["llm_processing"]["requested_mode"] == "auto"
+    assert asset["metadata"]["llm_processing"]["resolved_mode"] == "argument"
+    assert asset["metadata"]["llm_processing"]["mode_confidence"] == 0.88
     assert asset["metadata"]["llm_processing"]["handshake"]["request_artifacts"]["text"] == "analysis/llm/text_request.json"
     assert asset["metadata"]["llm_processing"]["handshake"]["analysis_model"] == "gpt-4.1-mini"
     assert asset["metadata"]["llm_processing"]["handshake"]["schema_mode"] == "json_schema"
@@ -416,6 +460,11 @@ def test_processor_runs_ffmpeg_whisper_and_llm_pipeline(tmp_path: Path, monkeypa
     assert asset["metadata"]["llm_processing"]["summary_available"] is True
     assert asset["metadata"]["llm_processing"]["key_point_count"] == 1
     assert asset["metadata"]["llm_processing"]["structured_result_available"] is True
+    assert asset["result"]["editorial"]["requested_mode"] == "auto"
+    assert asset["result"]["editorial"]["resolved_mode"] == "argument"
+    assert asset["result"]["editorial"]["base"]["core_summary"]["display"]["kind"] == "summary"
+    assert asset["result"]["editorial"]["mode_payload"]["author_thesis"]["display"]["kind"] == "thesis"
+    assert asset["result"]["editorial"]["mode_payload"]["evidence_backed_points"][0]["display"]["kind"] == "evidence"
     assert asset["metadata"]["media_processing"]["media_kind"] == "video"
     assert asset["metadata"]["media_processing"]["transcript_text_available"] is True
     assert asset["metadata"]["media_processing"]["multimodal_frame_paths"]
@@ -461,6 +510,47 @@ def test_serialize_structured_result_includes_typed_warning_refs() -> None:
     assert payload["evidence_backlinks"] == {}
     assert payload["result_index"]["warning-1"]["section"] == "warnings"
     assert payload["result_index"]["warning-1"]["evidence_segment_ids"] == ["missing-id"]
+
+
+def test_serialize_structured_result_includes_editorial_display_payload() -> None:
+    from content_ingestion.core.models import EditorialBase, EditorialResult, KeyPoint, ResultSummary, SynthesisResult
+
+    processor = JobProcessor()
+    payload = processor._serialize_structured_result(  # noqa: SLF001
+        StructuredResult(
+            summary=ResultSummary(headline="Headline", short_text="Short summary"),
+            key_points=[KeyPoint(id="kp-1", title="Point A", details="Details")],
+            synthesis=SynthesisResult(final_answer="Bottom line"),
+            editorial=EditorialResult(
+                requested_mode="auto",
+                resolved_mode="guide",
+                mode_confidence=0.77,
+                base=EditorialBase(
+                    core_summary="Core summary",
+                    bottom_line="Bottom line",
+                    audience_fit="General readers",
+                    save_worthy_points=["Save this"],
+                ),
+                mode_payload={
+                    "guide_goal": "Do the thing",
+                    "recommended_steps": ["Step one"],
+                    "tips": ["Tip A"],
+                    "pitfalls": ["Pitfall A"],
+                    "prerequisites": ["Need account"],
+                    "quick_win": "Start small",
+                },
+            ),
+        ),
+        evidence_segments=[],
+    )
+
+    assert payload is not None
+    assert payload["editorial"]["requested_mode"] == "auto"
+    assert payload["editorial"]["resolved_mode"] == "guide"
+    assert payload["editorial"]["base"]["core_summary"]["display"]["kind"] == "summary"
+    assert payload["editorial"]["mode_payload"]["guide_goal"]["display"]["kind"] == "meta"
+    assert payload["editorial"]["mode_payload"]["recommended_steps"][0]["display"]["kind"] == "step"
+    assert payload["editorial"]["mode_payload"]["pitfalls"][0]["display"]["tone"] == "warning"
 
 
 def _make_minimal_job(inbox, job_id: str) -> Path:
@@ -692,3 +782,101 @@ def test_visual_findings_in_result_not_in_analysis_items(tmp_path, monkeypatch):
     assert result["analysis_items"][0]["id"] == "an-1"
     assert result.get("content_kind") == "article"
     assert result.get("author_stance") == "neutral"
+
+
+def test_processor_normalized_result_includes_argument_product_view(tmp_path: Path, monkeypatch) -> None:
+    from content_ingestion.core.models import EditorialBase, EditorialResult, ResultSummary, SynthesisResult
+    from content_ingestion.pipeline.llm_pipeline import LlmAnalysisResult
+    from content_ingestion.pipeline.media_pipeline import MediaProcessingResult
+
+    shared_root = tmp_path / "shared_inbox"
+    inbox = ensure_shared_inbox(shared_root)
+    job_dir = inbox.processing / "jobPV"
+    job_dir.mkdir(parents=True)
+    (job_dir / "payload.html").write_text(
+        "<html><head><title>T</title></head><body><p>body</p></body></html>",
+        encoding="utf-8",
+    )
+    (job_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "job_id": "jobPV",
+                "source_url": "https://example.com",
+                "collector": "test",
+                "collected_at": "2026-03-28T00:00:00+00:00",
+                "content_type": "html",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "READY").write_text("", encoding="utf-8")
+
+    structured = StructuredResult(
+        content_kind="analysis",
+        author_stance="critical",
+        summary=ResultSummary(headline="结论先说", short_text="一句话解释"),
+        synthesis=SynthesisResult(final_answer="实际 takeaway"),
+        editorial=EditorialResult(
+            requested_mode="auto",
+            resolved_mode="argument",
+            mode_confidence=0.9,
+            base=EditorialBase(
+                core_summary="一句话解释",
+                bottom_line="实际 takeaway",
+                audience_fit="适合想快速判断的人",
+                save_worthy_points=["记住这点"],
+            ),
+            mode_payload={
+                "author_thesis": "结论先说",
+                "evidence_backed_points": [],
+                "interpretive_points": [],
+                "what_is_new": "新的角度",
+                "tensions": [],
+                "uncertainties": [],
+                "verification_items": [],
+            },
+        ),
+        product_view={
+            "hero": {
+                "title": "结论先说",
+                "dek": "一句话解释",
+                "bottom_line": "实际 takeaway",
+            },
+            "sections": [
+                {
+                    "kind": "question_block",
+                    "title": "为什么会这样？",
+                    "body": "因为证据链是闭合的。",
+                },
+                {
+                    "kind": "reader_value",
+                    "title": "这对我意味着什么？",
+                    "body": "实际 takeaway",
+                },
+            ],
+            "render_hints": {"layout_family": "analysis_brief"},
+        },
+    )
+    fake_llm = LlmAnalysisResult(
+        status="pass",
+        provider="openai",
+        structured_result=structured,
+        summary="一句话解释",
+        analysis_items=[],
+        verification_items=[],
+        synthesis="实际 takeaway",
+    )
+    monkeypatch.setattr("content_ingestion.inbox.processor.analyze_asset", lambda **_kw: fake_llm)
+    monkeypatch.setattr(
+        "content_ingestion.inbox.processor.process_media_asset",
+        lambda **_kw: MediaProcessingResult(status="skipped", steps=[]),
+    )
+
+    target_dir = JobProcessor().process(job_dir)
+    normalized = json.loads((target_dir / "normalized.json").read_text(encoding="utf-8"))
+    asset = normalized["asset"]
+
+    assert asset["result"]["product_view"] is not None
+    assert asset["result"]["product_view"]["hero"]["title"] == "结论先说"
+    assert asset["result"]["product_view"]["sections"][-1]["kind"] == "reader_value"
+    assert asset["result"]["product_view"]["sections"][-1]["title"] == "这对我意味着什么？"

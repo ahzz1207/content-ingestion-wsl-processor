@@ -44,11 +44,19 @@ class _FakeResponses:
                     "has_data": False,
                     "estimated_depth": "medium",
                 },
+                "suggested_mode": "argument",
+                "mode_confidence": 0.82,
             }
         elif schema_name == "content_analysis":
             payload = {
-                "summary": {"headline": "Demo headline", "short_text": "Short summary"},
-                "key_points": [
+                "core_summary": "Short summary",
+                "bottom_line": "Final synthesis",
+                "content_kind": "analysis",
+                "author_stance": "critical",
+                "audience_fit": "Readers who want a fast argument map.",
+                "save_worthy_points": ["Point A", "Point B"],
+                "author_thesis": "Demo headline",
+                "evidence_backed_points": [
                     {
                         "id": "kp-1",
                         "title": "Point A",
@@ -56,22 +64,23 @@ class _FakeResponses:
                         "evidence_segment_ids": ["e1"],
                     }
                 ],
-                "analysis_items": [
+                "interpretive_points": [
                     {
                         "id": "an-1",
                         "kind": "implication",
                         "statement": "Point A",
                         "evidence_segment_ids": ["e1"],
-                        "confidence": 0.9,
                     },
                     {
                         "id": "an-2",
                         "kind": "alternative",
                         "statement": "Point B",
                         "evidence_segment_ids": [],
-                        "confidence": 0.6,
                     },
                 ],
+                "what_is_new": "Novel perspective on the topic",
+                "tensions": ["Tension between claim A and claim B"],
+                "uncertainties": ["What is missing?"],
                 "verification_items": [
                     {
                         "id": "ver-1",
@@ -82,13 +91,6 @@ class _FakeResponses:
                         "confidence": 0.95,
                     },
                 ],
-                "synthesis": {
-                    "final_answer": "Final synthesis",
-                    "what_is_new": "Novel perspective on the topic",
-                    "tensions": ["Tension between claim A and claim B"],
-                    "next_steps": ["Review later"],
-                    "open_questions": ["What is missing?"],
-                },
             }
         else:
             payload = {
@@ -242,6 +244,232 @@ def test_analyze_asset_skips_without_api_key(monkeypatch, tmp_path: Path) -> Non
     assert result.warnings
 
 
+def test_reader_schema_has_v1_mode_fields() -> None:
+    from content_ingestion.pipeline.llm_pipeline import READER_SCHEMA
+
+    props = READER_SCHEMA["properties"]
+    assert "suggested_mode" in props
+    assert props["suggested_mode"]["type"] == "string"
+    assert set(props["suggested_mode"]["enum"]) == {"argument", "guide", "review"}
+    assert "mode_confidence" in props
+    assert props["mode_confidence"]["type"] == "number"
+    assert "suggested_mode" in READER_SCHEMA["required"]
+    assert "mode_confidence" in READER_SCHEMA["required"]
+
+
+def test_resolve_mode_honors_explicit_request() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_mode
+
+    mode, confidence = _resolve_mode("guide", {"suggested_mode": "argument", "mode_confidence": 0.9})
+
+    assert mode == "guide"
+    assert confidence == 1.0
+
+
+def test_resolve_mode_uses_reader_suggestion_for_auto() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_mode
+
+    mode, confidence = _resolve_mode("auto", {"suggested_mode": "review", "mode_confidence": 0.75})
+
+    assert mode == "review"
+    assert confidence == 0.75
+
+
+def test_resolve_mode_falls_back_to_argument_for_invalid_mode() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _resolve_mode
+
+    mode, confidence = _resolve_mode("auto", {"suggested_mode": "informational", "mode_confidence": 0.92})
+
+    assert mode == "argument"
+    assert confidence == 0.5
+
+
+def test_editorial_result_dataclasses_exist() -> None:
+    from content_ingestion.core.models import EditorialBase, EditorialResult, StructuredResult
+
+    base = EditorialBase(
+        core_summary="summary",
+        bottom_line="bottom line",
+        audience_fit="general readers",
+        save_worthy_points=["point-1"],
+    )
+    editorial = EditorialResult(
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.83,
+        base=base,
+        mode_payload={"author_thesis": "test thesis"},
+    )
+    result = StructuredResult(editorial=editorial)
+
+    assert result.editorial is not None
+    assert result.editorial.resolved_mode == "argument"
+    assert result.editorial.base.core_summary == "summary"
+    assert result.editorial.mode_payload["author_thesis"] == "test thesis"
+
+
+def test_build_structured_result_argument_mode_builds_editorial() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "summary",
+        "bottom_line": "bottom",
+        "content_kind": "analysis",
+        "author_stance": "critical",
+        "audience_fit": "macro readers",
+        "save_worthy_points": ["point-1"],
+        "author_thesis": "thesis",
+        "evidence_backed_points": [
+            {"id": "ep-1", "title": "Point A", "details": "A detail", "evidence_segment_ids": ["e1"]}
+        ],
+        "interpretive_points": [
+            {"id": "ip-1", "statement": "Implication A", "kind": "implication", "evidence_segment_ids": ["e1"]}
+        ],
+        "what_is_new": "new thing",
+        "tensions": ["tension-1"],
+        "uncertainties": ["uncertainty-1"],
+        "verification_items": [],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.72,
+    )
+
+    assert result.editorial is not None
+    assert result.editorial.requested_mode == "auto"
+    assert result.editorial.resolved_mode == "argument"
+    assert result.editorial.mode_confidence == 0.72
+    assert result.editorial.base.core_summary == "summary"
+    assert result.editorial.mode_payload["author_thesis"] == "thesis"
+    assert result.editorial.mode_payload["what_is_new"] == "new thing"
+    assert result.editorial.mode_payload["tensions"] == ["tension-1"]
+
+
+def test_build_structured_result_argument_mode_builds_product_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "一句话解释核心判断。",
+        "bottom_line": "实际 takeaway 在这里。",
+        "content_kind": "analysis",
+        "author_stance": "critical",
+        "audience_fit": "适合想快速判断的人",
+        "save_worthy_points": ["记住这点", "再想想这个影响"],
+        "author_thesis": "结论先说：这个观点站得住，但条件很多。",
+        "evidence_backed_points": [
+            {
+                "id": "ep-1",
+                "title": "为什么作者会这么判断？",
+                "details": "因为文本里给出了直接证据与案例。",
+                "evidence_segment_ids": ["e1"],
+            },
+            {
+                "id": "ep-2",
+                "title": "最有力的支撑是什么？",
+                "details": "关键在于它把现象和机制连在了一起。",
+                "evidence_segment_ids": ["e2"],
+            },
+        ],
+        "interpretive_points": [
+            {
+                "id": "ip-1",
+                "statement": "如果这个判断成立，后续决策会更保守。",
+                "kind": "implication",
+                "evidence_segment_ids": ["e1"],
+            }
+        ],
+        "what_is_new": "它把熟悉的问题换了一个更有解释力的角度。",
+        "tensions": ["证据支持方向明确，但外推仍有风险。"],
+        "uncertainties": ["外部条件变化时是否还成立？"],
+        "verification_items": [],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.72,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view["hero"]["title"] == "结论先说：这个观点站得住，但条件很多。"
+    assert result.product_view["hero"]["dek"] == "一句话解释核心判断。"
+    assert result.product_view["hero"]["bottom_line"] == "实际 takeaway 在这里。"
+    assert any(section["kind"] == "question_block" for section in result.product_view["sections"])
+    assert result.product_view["sections"][-1]["kind"] == "reader_value"
+    assert result.product_view["sections"][-1]["title"] == "这对我意味着什么？"
+    assert result.product_view["render_hints"]["layout_family"] == "analysis_brief"
+
+
+def test_build_structured_result_guide_mode_builds_editorial() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "guide summary",
+        "bottom_line": "do X",
+        "content_kind": "tutorial",
+        "author_stance": "explanatory",
+        "audience_fit": "players",
+        "save_worthy_points": ["tip-1"],
+        "guide_goal": "learn Y",
+        "recommended_steps": ["Step 1", "Step 2"],
+        "tips": ["Tip A"],
+        "pitfalls": ["Pitfall A"],
+        "prerequisites": ["Need account"],
+        "quick_win": "Start with stage 1",
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="guide",
+        resolved_mode="guide",
+        mode_confidence=1.0,
+    )
+
+    assert result.editorial is not None
+    assert result.editorial.resolved_mode == "guide"
+    assert result.editorial.mode_payload["guide_goal"] == "learn Y"
+    assert result.editorial.mode_payload["recommended_steps"] == ["Step 1", "Step 2"]
+
+
+def test_build_structured_result_review_mode_builds_editorial() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "review summary",
+        "bottom_line": "worth trying",
+        "content_kind": "review",
+        "author_stance": "mixed",
+        "audience_fit": "fans of ambient music",
+        "save_worthy_points": ["highlight-1"],
+        "overall_judgment": "excellent",
+        "highlights": ["Great production"],
+        "style_and_mood": "warm and spacious",
+        "what_stands_out": "texture",
+        "who_it_is_for": "ambient listeners",
+        "reservation_points": ["slow pacing"],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="review",
+        resolved_mode="review",
+        mode_confidence=1.0,
+    )
+
+    assert result.editorial is not None
+    assert result.editorial.resolved_mode == "review"
+    assert result.editorial.mode_payload["overall_judgment"] == "excellent"
+    assert result.editorial.mode_payload["highlights"] == ["Great production"]
+
+
 def test_analyze_asset_cleans_invalid_evidence_references(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("CONTENT_INGESTION_ANALYSIS_MODEL", "gpt-4.1-mini")
@@ -249,41 +477,62 @@ def test_analyze_asset_cleans_invalid_evidence_references(monkeypatch, tmp_path:
 
     class _InvalidResponses:
         def create(self, **kwargs):
-            payload = {
-                "summary": {"headline": "Headline", "short_text": "Summary"},
-                "key_points": [
-                    {
-                        "id": "kp-1",
-                        "title": "Point A",
-                        "details": "Details",
-                        "evidence_segment_ids": ["missing-id", "e1"],
-                    }
-                ],
-                "analysis_items": [
-                    {
-                        "id": "an-1",
-                        "kind": "fact",
-                        "statement": "Statement",
-                        "evidence_segment_ids": ["missing-id"],
-                        "confidence": 0.8,
-                    }
-                ],
-                "verification_items": [
-                    {
-                        "id": "ver-1",
-                        "claim": "Claim A",
-                        "status": "supported",
-                        "evidence_segment_ids": ["missing-id"],
-                        "rationale": "Model claimed evidence exists",
-                        "confidence": 0.9,
-                    }
-                ],
-                "synthesis": {
-                    "final_answer": "Answer",
-                    "next_steps": [],
-                    "open_questions": [],
-                },
-            }
+            schema_name = kwargs.get("text", {}).get("format", {}).get("name", "")
+            if schema_name == "reader_analysis":
+                payload = {
+                    "document_type": "article",
+                    "thesis": "Demo thesis",
+                    "chapter_map": [],
+                    "argument_skeleton": [],
+                    "content_signals": {
+                        "evidence_density": "medium",
+                        "rhetoric_density": "low",
+                        "has_novel_claim": False,
+                        "has_data": False,
+                        "estimated_depth": "medium",
+                    },
+                    "suggested_mode": "argument",
+                    "mode_confidence": 0.6,
+                }
+            else:
+                payload = {
+                    "core_summary": "Summary",
+                    "bottom_line": "Answer",
+                    "content_kind": "analysis",
+                    "author_stance": "critical",
+                    "audience_fit": "general readers",
+                    "save_worthy_points": [],
+                    "author_thesis": "Headline",
+                    "evidence_backed_points": [
+                        {
+                            "id": "kp-1",
+                            "title": "Point A",
+                            "details": "Details",
+                            "evidence_segment_ids": ["missing-id", "e1"],
+                        }
+                    ],
+                    "interpretive_points": [
+                        {
+                            "id": "an-1",
+                            "kind": "implication",
+                            "statement": "Statement",
+                            "evidence_segment_ids": ["missing-id"],
+                        }
+                    ],
+                    "what_is_new": "",
+                    "tensions": [],
+                    "uncertainties": [],
+                    "verification_items": [
+                        {
+                            "id": "ver-1",
+                            "claim": "Claim A",
+                            "status": "supported",
+                            "evidence_segment_ids": ["missing-id"],
+                            "rationale": "Model claimed evidence exists",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
             return type("Response", (), {"output_text": json.dumps(payload, ensure_ascii=False)})()
 
     class _InvalidClient:
@@ -332,8 +581,30 @@ def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path
             self.call_count += 1
             if self.call_count == 1:
                 payload = {
-                    "summary": {"headline": "Headline", "short_text": "Summary"},
-                    "key_points": [
+                    "document_type": "article",
+                    "thesis": "Demo thesis",
+                    "chapter_map": [],
+                    "argument_skeleton": [],
+                    "content_signals": {
+                        "evidence_density": "medium",
+                        "rhetoric_density": "low",
+                        "has_novel_claim": False,
+                        "has_data": False,
+                        "estimated_depth": "medium",
+                    },
+                    "suggested_mode": "argument",
+                    "mode_confidence": 0.6,
+                }
+            elif self.call_count == 2:
+                payload = {
+                    "core_summary": "Summary",
+                    "bottom_line": "Answer",
+                    "content_kind": "analysis",
+                    "author_stance": "critical",
+                    "audience_fit": "general readers",
+                    "save_worthy_points": [],
+                    "author_thesis": "Headline",
+                    "evidence_backed_points": [
                         {
                             "id": "kp-1",
                             "title": "Point A",
@@ -341,15 +612,17 @@ def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path
                             "evidence_segment_ids": ["missing-id"],
                         }
                     ],
-                    "analysis_items": [
+                    "interpretive_points": [
                         {
                             "id": "an-1",
-                            "kind": "fact",
+                            "kind": "implication",
                             "statement": "Statement",
                             "evidence_segment_ids": ["missing-id"],
-                            "confidence": 0.8,
                         }
                     ],
+                    "what_is_new": "",
+                    "tensions": [],
+                    "uncertainties": [],
                     "verification_items": [
                         {
                             "id": "ver-1",
@@ -360,16 +633,17 @@ def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path
                             "confidence": 0.9,
                         }
                     ],
-                    "synthesis": {
-                        "final_answer": "Answer",
-                        "next_steps": [],
-                        "open_questions": [],
-                    },
                 }
             else:
                 payload = {
-                    "summary": {"headline": "Headline", "short_text": "Summary"},
-                    "key_points": [
+                    "core_summary": "Summary",
+                    "bottom_line": "Answer",
+                    "content_kind": "analysis",
+                    "author_stance": "critical",
+                    "audience_fit": "general readers",
+                    "save_worthy_points": [],
+                    "author_thesis": "Headline",
+                    "evidence_backed_points": [
                         {
                             "id": "kp-1",
                             "title": "Point A",
@@ -377,15 +651,17 @@ def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path
                             "evidence_segment_ids": ["e1"],
                         }
                     ],
-                    "analysis_items": [
+                    "interpretive_points": [
                         {
                             "id": "an-1",
-                            "kind": "fact",
+                            "kind": "implication",
                             "statement": "Statement",
                             "evidence_segment_ids": ["e1"],
-                            "confidence": 0.8,
                         }
                     ],
+                    "what_is_new": "",
+                    "tensions": [],
+                    "uncertainties": [],
                     "verification_items": [
                         {
                             "id": "ver-1",
@@ -396,11 +672,6 @@ def test_analyze_asset_repairs_invalid_evidence_references(monkeypatch, tmp_path
                             "confidence": 0.9,
                         }
                     ],
-                    "synthesis": {
-                        "final_answer": "Answer",
-                        "next_steps": [],
-                        "open_questions": [],
-                    },
                 }
             return type("Response", (), {"output_text": json.dumps(payload, ensure_ascii=False)})()
 
@@ -570,12 +841,20 @@ def test_analyze_asset_repair_preserves_chapter_map(monkeypatch, tmp_path: Path)
                         "has_data": False,
                         "estimated_depth": "medium",
                     },
+                    "suggested_mode": "argument",
+                    "mode_confidence": 0.7,
                 }
             elif self.call_count == 2:
                 # First synthesizer call — invalid evidence
                 payload = {
-                    "summary": {"headline": "Headline", "short_text": "Summary"},
-                    "key_points": [
+                    "core_summary": "Summary",
+                    "bottom_line": "Answer",
+                    "content_kind": "analysis",
+                    "author_stance": "critical",
+                    "audience_fit": "general readers",
+                    "save_worthy_points": [],
+                    "author_thesis": "Headline",
+                    "evidence_backed_points": [
                         {
                             "id": "kp-1",
                             "title": "Point A",
@@ -583,21 +862,23 @@ def test_analyze_asset_repair_preserves_chapter_map(monkeypatch, tmp_path: Path)
                             "evidence_segment_ids": ["missing-id"],
                         }
                     ],
-                    "analysis_items": [],
+                    "interpretive_points": [],
+                    "what_is_new": "Something new",
+                    "tensions": [],
+                    "uncertainties": [],
                     "verification_items": [],
-                    "synthesis": {
-                        "final_answer": "Answer",
-                        "what_is_new": "Something new",
-                        "tensions": [],
-                        "next_steps": [],
-                        "open_questions": [],
-                    },
                 }
             else:
                 # Repair call — valid evidence
                 payload = {
-                    "summary": {"headline": "Headline", "short_text": "Summary"},
-                    "key_points": [
+                    "core_summary": "Summary",
+                    "bottom_line": "Answer",
+                    "content_kind": "analysis",
+                    "author_stance": "critical",
+                    "audience_fit": "general readers",
+                    "save_worthy_points": [],
+                    "author_thesis": "Headline",
+                    "evidence_backed_points": [
                         {
                             "id": "kp-1",
                             "title": "Point A",
@@ -605,15 +886,11 @@ def test_analyze_asset_repair_preserves_chapter_map(monkeypatch, tmp_path: Path)
                             "evidence_segment_ids": ["e1"],
                         }
                     ],
-                    "analysis_items": [],
+                    "interpretive_points": [],
+                    "what_is_new": "Something new",
+                    "tensions": [],
+                    "uncertainties": [],
                     "verification_items": [],
-                    "synthesis": {
-                        "final_answer": "Answer",
-                        "what_is_new": "Something new",
-                        "tensions": [],
-                        "next_steps": [],
-                        "open_questions": [],
-                    },
                 }
             return type("Response", (), {"output_text": json.dumps(payload, ensure_ascii=False)})()
 

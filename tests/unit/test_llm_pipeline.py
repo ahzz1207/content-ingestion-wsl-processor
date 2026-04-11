@@ -404,6 +404,87 @@ def test_build_structured_result_argument_mode_builds_product_view() -> None:
     assert result.product_view["sections"][-1]["kind"] == "reader_value"
     assert result.product_view["sections"][-1]["title"] == "这对我意味着什么？"
     assert result.product_view["render_hints"]["layout_family"] == "analysis_brief"
+    assert result.product_view["layout"] == "analysis_brief"
+    for section in result.product_view["sections"]:
+        assert "blocks" in section, f"section {section['kind']} missing blocks"
+        assert isinstance(section["blocks"], list)
+
+
+def test_build_structured_result_guide_mode_builds_product_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "guide summary",
+        "bottom_line": "do X",
+        "content_kind": "tutorial",
+        "author_stance": "explanatory",
+        "audience_fit": "players",
+        "save_worthy_points": ["tip-1"],
+        "guide_goal": "learn Y",
+        "recommended_steps": ["Step 1", "Step 2", "Step 3"],
+        "tips": ["Tip A", "Tip B"],
+        "pitfalls": ["Pitfall A"],
+        "prerequisites": ["Need account"],
+        "quick_win": "Start with stage 1",
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="guide",
+        resolved_mode="guide",
+        mode_confidence=1.0,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view["hero"]["title"] == "learn Y"
+    assert result.product_view["hero"]["bottom_line"] == "Start with stage 1"
+    assert result.product_view["layout"] == "practical_guide"
+    assert result.product_view["render_hints"]["layout_family"] == "practical_guide"
+    assert any(s["kind"] == "action_step" for s in result.product_view["sections"])
+    assert result.product_view["sections"][-1]["kind"] == "reader_value"
+    for section in result.product_view["sections"]:
+        assert "blocks" in section
+        assert isinstance(section["blocks"], list)
+
+
+def test_build_structured_result_review_mode_builds_product_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "review summary",
+        "bottom_line": "worth trying",
+        "content_kind": "review",
+        "author_stance": "mixed",
+        "audience_fit": "fans of ambient music",
+        "save_worthy_points": ["highlight-1"],
+        "overall_judgment": "excellent",
+        "highlights": ["Great production", "Beautiful textures"],
+        "style_and_mood": "warm and spacious",
+        "what_stands_out": "texture",
+        "who_it_is_for": "ambient listeners",
+        "reservation_points": ["slow pacing"],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="review",
+        resolved_mode="review",
+        mode_confidence=1.0,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view["hero"]["title"] == "excellent"
+    assert result.product_view["layout"] == "review_curation"
+    assert result.product_view["render_hints"]["layout_family"] == "review_curation"
+    assert any(s["kind"] == "highlight_block" for s in result.product_view["sections"])
+    assert any(s["kind"] == "reservation_block" for s in result.product_view["sections"])
+    assert result.product_view["sections"][-1]["kind"] == "reader_value"
+    assert result.product_view["sections"][-1]["title"] == "这适合什么样的人？"
+    for section in result.product_view["sections"]:
+        assert "blocks" in section
+        assert isinstance(section["blocks"], list)
 
 
 def test_build_structured_result_guide_mode_builds_editorial() -> None:

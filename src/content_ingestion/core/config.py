@@ -31,6 +31,8 @@ class Settings:
     bilibili_whisper_model: str
     bilibili_whisper_language: str | None
     llm_max_content_chars: int
+    image_card_model: str | None
+    image_card_base_url: str | None
 
 
 def _read_bool(name: str, default: bool) -> bool:
@@ -77,6 +79,9 @@ def load_settings() -> Settings:
     multimodal_model = _read_first_env("CONTENT_INGESTION_MULTIMODAL_MODEL", "ZENMUX_MULTIMODAL_MODEL")
     if multimodal_model is None:
         multimodal_model = analysis_model
+    image_card_model = _read_first_env("CONTENT_INGESTION_IMAGE_CARD_MODEL")
+    image_card_base_url = _read_first_env("CONTENT_INGESTION_IMAGE_CARD_BASE_URL")
+
     settings = Settings(
         project_root=project_root,
         data_dir=data_dir,
@@ -107,6 +112,8 @@ def load_settings() -> Settings:
         bilibili_whisper_model=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_MODEL", "medium"),
         bilibili_whisper_language=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_LANGUAGE") or None,
         llm_max_content_chars=int(os.getenv("CONTENT_INGESTION_LLM_MAX_CONTENT_CHARS", "40000")),
+        image_card_model=image_card_model,
+        image_card_base_url=image_card_base_url,
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.sessions_dir.mkdir(parents=True, exist_ok=True)

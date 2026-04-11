@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from content_ingestion.core.config import Settings
+from content_ingestion.pipeline.visual_summary import generate_visual_summary
 from content_ingestion.core.models import (
     AnalysisItem,
     ChapterEntry,
@@ -558,6 +559,38 @@ def analyze_asset(
         if not result.synthesis:
             result.synthesis = str(multimodal_payload["overall_assessment"]).strip()
 
+    # === Visual Summary Card ===
+    insight_card_path = None
+    if settings.image_card_model:
+        try:
+            image_client_kwargs = {"api_key": settings.openai_api_key}
+            if settings.image_card_base_url:
+                image_client_kwargs["base_url"] = settings.image_card_base_url
+            elif settings.openai_base_url:
+                image_client_kwargs["base_url"] = settings.openai_base_url
+            openai_module = importlib.import_module("openai")
+            image_client = openai_module.OpenAI(**image_client_kwargs)
+            card_output = job_dir / "analysis" / "insight_card.png"
+            card_step = generate_visual_summary(
+                client=image_client,
+                model=settings.image_card_model,
+                structured_result=structured_result,
+                resolved_mode=resolved_mode,
+                asset_title=asset.title or "",
+                output_path=card_output,
+            )
+            result.steps.append(card_step)
+            if card_step["status"] == "success":
+                insight_card_path = card_output.relative_to(job_dir).as_posix()
+        except Exception as exc:
+            logger.warning("Visual summary card generation failed: %s", exc)
+            result.steps.append({
+                "name": "visual_summary_card",
+                "status": "skipped",
+                "details": f"generation failed: {exc}",
+            })
+            result.warnings.append(f"Visual summary card skipped: {exc}")
+
     output_path = analysis_dir / "analysis_result.json"
     output_path.write_text(
         json.dumps(
@@ -589,6 +622,7 @@ def analyze_asset(
                 "analysis_model": result.analysis_model,
                 "multimodal_model": result.multimodal_model,
                 "warnings": result.warnings,
+                "insight_card_path": insight_card_path,
                 "steps": result.steps,
             },
             ensure_ascii=False,

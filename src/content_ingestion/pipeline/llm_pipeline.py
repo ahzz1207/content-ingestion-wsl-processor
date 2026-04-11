@@ -1088,40 +1088,103 @@ def _build_product_view(
     editorial_base: EditorialBase,
     mode_payload: dict[str, object],
 ) -> dict[str, object] | None:
-    if resolved_mode != "argument":
+    builders = {
+        "argument": _build_argument_product_view,
+        "guide": _build_guide_product_view,
+        "review": _build_review_product_view,
+    }
+    builder = builders.get(resolved_mode)
+    if builder is None:
         return None
+    return builder(editorial_base, mode_payload)
 
+
+def _paragraph_block(text: str) -> dict[str, object]:
+    return {"type": "paragraph", "text": text}
+
+
+def _bullet_list_block(items: list[str]) -> dict[str, object]:
+    return {"type": "bullet_list", "items": items}
+
+
+def _step_list_block(items: list[str]) -> dict[str, object]:
+    return {"type": "step_list", "items": items}
+
+
+def _reader_value_section(
+    title: str,
+    editorial_base: EditorialBase,
+    extra_bits: list[str] | None = None,
+) -> dict[str, object]:
+    bits = [editorial_base.bottom_line.strip()]
+    if editorial_base.audience_fit.strip():
+        bits.append(editorial_base.audience_fit.strip())
+    if editorial_base.save_worthy_points:
+        bits.append(editorial_base.save_worthy_points[0])
+    if extra_bits:
+        bits.extend(extra_bits)
+    body = " ".join(bit for bit in bits if bit).strip()
+    if not body:
+        body = editorial_base.core_summary.strip()
+    return {
+        "kind": "reader_value",
+        "title": title,
+        "blocks": [_paragraph_block(body)] if body else [],
+    }
+
+
+def _cap_sections(sections: list[dict[str, object]], max_body: int = 4) -> list[dict[str, object]]:
+    if len(sections) <= max_body + 1:
+        return sections
+    return sections[:max_body] + [sections[-1]]
+
+
+def _wrap_product_view(
+    layout: str,
+    hero_title: str,
+    hero_dek: str,
+    hero_bottom_line: str,
+    sections: list[dict[str, object]],
+) -> dict[str, object] | None:
+    if not hero_title:
+        return None
+    return {
+        "hero": {
+            "title": hero_title,
+            "dek": hero_dek,
+            "bottom_line": hero_bottom_line,
+        },
+        "layout": layout,
+        "sections": sections,
+        "render_hints": {
+            "layout_family": layout,
+        },
+    }
+
+
+def _build_argument_product_view(
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> dict[str, object] | None:
     hero_title = str(mode_payload.get("author_thesis") or editorial_base.core_summary or editorial_base.bottom_line).strip()
     hero_dek = editorial_base.core_summary.strip()
     hero_bottom_line = editorial_base.bottom_line.strip()
 
-    sections: list[dict[str, str]] = []
+    sections: list[dict[str, object]] = []
 
     for item in mode_payload.get("evidence_backed_points", []):
         title = str(item.get("title") or "").strip()
         details = str(item.get("details") or "").strip()
         if not title or not details:
             continue
-        sections.append(
-            {
-                "kind": "question_block",
-                "title": title,
-                "body": details,
-            }
-        )
+        sections.append({"kind": "question_block", "title": title, "blocks": [_paragraph_block(details)]})
         if len(sections) == 2:
             break
 
     if not sections:
-        fallback_body = hero_title or hero_dek or hero_bottom_line
-        if fallback_body:
-            sections.append(
-                {
-                    "kind": "question_block",
-                    "title": "核心判断是什么？",
-                    "body": fallback_body,
-                }
-            )
+        fallback = hero_title or hero_dek or hero_bottom_line
+        if fallback:
+            sections.append({"kind": "question_block", "title": "核心判断是什么？", "blocks": [_paragraph_block(fallback)]})
 
     interpretive_points = mode_payload.get("interpretive_points", [])
     first_interpretive = interpretive_points[0] if interpretive_points else None
@@ -1129,68 +1192,112 @@ def _build_product_view(
     if isinstance(first_interpretive, dict):
         interpretive_statement = str(first_interpretive.get("statement") or "").strip()
     if interpretive_statement:
-        sections.append(
-            {
-                "kind": "question_block",
-                "title": "接下来会带来什么影响？",
-                "body": interpretive_statement,
-            }
-        )
+        sections.append({"kind": "question_block", "title": "接下来会带来什么影响？", "blocks": [_paragraph_block(interpretive_statement)]})
     else:
         what_is_new = str(mode_payload.get("what_is_new") or "").strip()
         first_tension = next((str(item).strip() for item in mode_payload.get("tensions", []) if str(item).strip()), "")
-        middle_body = what_is_new or first_tension or hero_dek or hero_title
-        if middle_body:
-            sections.append(
-                {
-                    "kind": "question_block",
-                    "title": "最值得注意的点是什么？",
-                    "body": middle_body,
-                }
-            )
+        middle = what_is_new or first_tension or hero_dek or hero_title
+        if middle:
+            sections.append({"kind": "question_block", "title": "最值得注意的点是什么？", "blocks": [_paragraph_block(middle)]})
 
-    reader_value_bits = [hero_bottom_line]
-    if editorial_base.audience_fit.strip():
-        reader_value_bits.append(editorial_base.audience_fit.strip())
-    if editorial_base.save_worthy_points:
-        reader_value_bits.append(editorial_base.save_worthy_points[0])
-    reader_value_body = " ".join(bit for bit in reader_value_bits if bit).strip()
-    if not reader_value_body:
-        reader_value_body = hero_bottom_line or hero_dek or hero_title
-    sections.append(
-        {
-            "kind": "reader_value",
-            "title": "这对我意味着什么？",
-            "body": reader_value_body,
-        }
-    )
+    sections.append(_reader_value_section("这对我意味着什么？", editorial_base))
 
-    question_sections = [section for section in sections[:-1] if section["kind"] == "question_block"]
+    question_sections = [s for s in sections[:-1] if s["kind"] == "question_block"]
     if len(question_sections) < 2:
-        filler_body = str(mode_payload.get("what_is_new") or "").strip() or hero_dek or hero_title
-        if filler_body:
-            sections.insert(
-                max(len(sections) - 1, 0),
-                {
-                    "kind": "question_block",
-                    "title": "为什么值得关注？",
-                    "body": filler_body,
-                },
-            )
+        filler = str(mode_payload.get("what_is_new") or "").strip() or hero_dek or hero_title
+        if filler:
+            sections.insert(max(len(sections) - 1, 0), {"kind": "question_block", "title": "为什么值得关注？", "blocks": [_paragraph_block(filler)]})
 
-    sections = sections[:4] + [sections[-1]] if len(sections) > 5 else sections
+    sections = _cap_sections(sections)
+    return _wrap_product_view("analysis_brief", hero_title, hero_dek, hero_bottom_line, sections)
 
-    return {
-        "hero": {
-            "title": hero_title,
-            "dek": hero_dek,
-            "bottom_line": hero_bottom_line,
-        },
-        "sections": sections,
-        "render_hints": {
-            "layout_family": "analysis_brief",
-        },
-    }
+
+def _build_guide_product_view(
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> dict[str, object] | None:
+    guide_goal = str(mode_payload.get("guide_goal") or "").strip()
+    hero_title = guide_goal or editorial_base.core_summary.strip()
+    hero_dek = editorial_base.core_summary.strip()
+    quick_win = str(mode_payload.get("quick_win") or "").strip()
+    hero_bottom_line = quick_win or editorial_base.bottom_line.strip()
+
+    sections: list[dict[str, object]] = []
+    steps = [str(s).strip() for s in mode_payload.get("recommended_steps", []) if str(s).strip()]
+    tips = [str(t).strip() for t in mode_payload.get("tips", []) if str(t).strip()]
+    pitfalls = [str(p).strip() for p in mode_payload.get("pitfalls", []) if str(p).strip()]
+
+    step_titles = ["第一步该怎么做？", "然后呢？", "还需要注意什么？"]
+    if steps:
+        chunk_size = max(1, len(steps) // min(3, len(steps)))
+        for i in range(0, len(steps), chunk_size):
+            chunk = steps[i:i + chunk_size]
+            title = step_titles[min(i // chunk_size, len(step_titles) - 1)]
+            sections.append({"kind": "action_step", "title": title, "blocks": [_step_list_block(chunk)]})
+            if len(sections) >= 3:
+                break
+    elif tips:
+        sections.append({"kind": "action_step", "title": "第一步该怎么做？", "blocks": [_bullet_list_block(tips[:3])]})
+
+    if not sections:
+        fallback = editorial_base.core_summary.strip() or hero_title
+        if fallback:
+            sections.append({"kind": "action_step", "title": "核心要点是什么？", "blocks": [_paragraph_block(fallback)]})
+
+    if tips and steps:
+        sections.append({"kind": "tip_block", "title": "有什么实用技巧？", "blocks": [_bullet_list_block(tips[:5])]})
+
+    if pitfalls:
+        sections.append({"kind": "pitfall_warning", "title": "容易踩什么坑？", "blocks": [_bullet_list_block(pitfalls[:5])]})
+
+    extra = [quick_win] if quick_win else []
+    sections.append(_reader_value_section("这对我意味着什么？", editorial_base, extra))
+
+    sections = _cap_sections(sections)
+    return _wrap_product_view("practical_guide", hero_title, hero_dek, hero_bottom_line, sections)
+
+
+def _build_review_product_view(
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> dict[str, object] | None:
+    overall_judgment = str(mode_payload.get("overall_judgment") or "").strip()
+    hero_title = overall_judgment or editorial_base.core_summary.strip()
+    hero_dek = editorial_base.core_summary.strip()
+    hero_bottom_line = editorial_base.bottom_line.strip()
+
+    sections: list[dict[str, object]] = []
+    highlights = [str(h).strip() for h in mode_payload.get("highlights", []) if str(h).strip()]
+    what_stands_out = str(mode_payload.get("what_stands_out") or "").strip()
+    style_and_mood = str(mode_payload.get("style_and_mood") or "").strip()
+    reservation_points = [str(r).strip() for r in mode_payload.get("reservation_points", []) if str(r).strip()]
+    who_it_is_for = str(mode_payload.get("who_it_is_for") or "").strip()
+
+    if highlights:
+        if len(highlights) == 1:
+            sections.append({"kind": "highlight_block", "title": "最值得关注的亮点是什么？", "blocks": [_paragraph_block(highlights[0])]})
+        else:
+            sections.append({"kind": "highlight_block", "title": "最值得关注的亮点是什么？", "blocks": [_bullet_list_block(highlights[:5])]})
+    elif what_stands_out:
+        sections.append({"kind": "highlight_block", "title": "最值得关注的亮点是什么？", "blocks": [_paragraph_block(what_stands_out)]})
+
+    standout_text = " ".join(part for part in [what_stands_out, style_and_mood] if part).strip()
+    if standout_text and highlights:
+        sections.append({"kind": "standout_block", "title": "最让人印象深刻的是什么？", "blocks": [_paragraph_block(standout_text)]})
+
+    if reservation_points:
+        sections.append({"kind": "reservation_block", "title": "有什么保留意见？", "blocks": [_bullet_list_block(reservation_points[:5])]})
+
+    if not sections:
+        fallback = editorial_base.core_summary.strip() or hero_title
+        if fallback:
+            sections.append({"kind": "highlight_block", "title": "最值得关注的亮点是什么？", "blocks": [_paragraph_block(fallback)]})
+
+    extra = [who_it_is_for] if who_it_is_for else []
+    sections.append(_reader_value_section("这适合什么样的人？", editorial_base, extra))
+
+    sections = _cap_sections(sections)
+    return _wrap_product_view("review_curation", hero_title, hero_dek, hero_bottom_line, sections)
 
 
 def _build_editorial_mode_payload(resolved_mode: str, payload: dict[str, object]) -> dict[str, object]:

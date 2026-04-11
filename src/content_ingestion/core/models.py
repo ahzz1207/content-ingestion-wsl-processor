@@ -146,6 +146,7 @@ class StructuredResult:
     warnings: list[WarningItem] = field(default_factory=list)
     chapter_map: list[ChapterEntry] = field(default_factory=list)
     editorial: EditorialResult | None = None
+    product_view: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

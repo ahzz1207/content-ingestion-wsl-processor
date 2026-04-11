@@ -574,6 +574,7 @@ class JobProcessor:
             "warnings": warnings_payload,
             "chapter_map": chapter_map_payload,
             "editorial": self._serialize_editorial_result(getattr(result, "editorial", None)),
+            "product_view": getattr(result, "product_view", None),
             "evidence_backlinks": evidence_backlinks,
             "result_index": result_index,
             "display_plan": self._build_display_plan(

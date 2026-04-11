@@ -936,7 +936,7 @@ def _build_structured_result(
     requested_mode: str,
     resolved_mode: str,
     mode_confidence: float | None,
-) -> StructuredResult:
+    ) -> StructuredResult:
     content_kind = str(payload.get("content_kind") or "").strip() or None
     author_stance = str(payload.get("author_stance") or "").strip() or None
     chapter_map = []
@@ -959,6 +959,7 @@ def _build_structured_result(
         save_worthy_points=[str(item).strip() for item in payload.get("save_worthy_points", []) if str(item).strip()],
     )
     mode_payload = _build_editorial_mode_payload(resolved_mode, payload)
+    product_view = _build_product_view(resolved_mode, editorial_base, mode_payload)
     return StructuredResult(
         content_kind=content_kind,
         author_stance=author_stance,
@@ -975,6 +976,7 @@ def _build_structured_result(
             base=editorial_base,
             mode_payload=mode_payload,
         ),
+        product_view=product_view,
     )
 
 
@@ -1077,6 +1079,117 @@ def _serialize_structured_result(result: StructuredResult | None) -> dict[str, o
         ],
         "warnings": [_serialize_warning_item(item) for item in result.warnings],
         "editorial": _serialize_editorial_result(result.editorial),
+        "product_view": result.product_view,
+    }
+
+
+def _build_product_view(
+    resolved_mode: str,
+    editorial_base: EditorialBase,
+    mode_payload: dict[str, object],
+) -> dict[str, object] | None:
+    if resolved_mode != "argument":
+        return None
+
+    hero_title = str(mode_payload.get("author_thesis") or editorial_base.core_summary or editorial_base.bottom_line).strip()
+    hero_dek = editorial_base.core_summary.strip()
+    hero_bottom_line = editorial_base.bottom_line.strip()
+
+    sections: list[dict[str, str]] = []
+
+    for item in mode_payload.get("evidence_backed_points", []):
+        title = str(item.get("title") or "").strip()
+        details = str(item.get("details") or "").strip()
+        if not title or not details:
+            continue
+        sections.append(
+            {
+                "kind": "question_block",
+                "title": title,
+                "body": details,
+            }
+        )
+        if len(sections) == 2:
+            break
+
+    if not sections:
+        fallback_body = hero_title or hero_dek or hero_bottom_line
+        if fallback_body:
+            sections.append(
+                {
+                    "kind": "question_block",
+                    "title": "核心判断是什么？",
+                    "body": fallback_body,
+                }
+            )
+
+    interpretive_points = mode_payload.get("interpretive_points", [])
+    first_interpretive = interpretive_points[0] if interpretive_points else None
+    interpretive_statement = ""
+    if isinstance(first_interpretive, dict):
+        interpretive_statement = str(first_interpretive.get("statement") or "").strip()
+    if interpretive_statement:
+        sections.append(
+            {
+                "kind": "question_block",
+                "title": "接下来会带来什么影响？",
+                "body": interpretive_statement,
+            }
+        )
+    else:
+        what_is_new = str(mode_payload.get("what_is_new") or "").strip()
+        first_tension = next((str(item).strip() for item in mode_payload.get("tensions", []) if str(item).strip()), "")
+        middle_body = what_is_new or first_tension or hero_dek or hero_title
+        if middle_body:
+            sections.append(
+                {
+                    "kind": "question_block",
+                    "title": "最值得注意的点是什么？",
+                    "body": middle_body,
+                }
+            )
+
+    reader_value_bits = [hero_bottom_line]
+    if editorial_base.audience_fit.strip():
+        reader_value_bits.append(editorial_base.audience_fit.strip())
+    if editorial_base.save_worthy_points:
+        reader_value_bits.append(editorial_base.save_worthy_points[0])
+    reader_value_body = " ".join(bit for bit in reader_value_bits if bit).strip()
+    if not reader_value_body:
+        reader_value_body = hero_bottom_line or hero_dek or hero_title
+    sections.append(
+        {
+            "kind": "reader_value",
+            "title": "这对我意味着什么？",
+            "body": reader_value_body,
+        }
+    )
+
+    question_sections = [section for section in sections[:-1] if section["kind"] == "question_block"]
+    if len(question_sections) < 2:
+        filler_body = str(mode_payload.get("what_is_new") or "").strip() or hero_dek or hero_title
+        if filler_body:
+            sections.insert(
+                max(len(sections) - 1, 0),
+                {
+                    "kind": "question_block",
+                    "title": "为什么值得关注？",
+                    "body": filler_body,
+                },
+            )
+
+    sections = sections[:4] + [sections[-1]] if len(sections) > 5 else sections
+
+    return {
+        "hero": {
+            "title": hero_title,
+            "dek": hero_dek,
+            "bottom_line": hero_bottom_line,
+        },
+        "sections": sections,
+        "render_hints": {
+            "layout_family": "analysis_brief",
+        },
     }
 
 

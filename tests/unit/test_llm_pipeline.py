@@ -349,6 +349,63 @@ def test_build_structured_result_argument_mode_builds_editorial() -> None:
     assert result.editorial.mode_payload["tensions"] == ["tension-1"]
 
 
+def test_build_structured_result_argument_mode_builds_product_view() -> None:
+    from content_ingestion.pipeline.llm_pipeline import _build_structured_result
+
+    payload = {
+        "core_summary": "一句话解释核心判断。",
+        "bottom_line": "实际 takeaway 在这里。",
+        "content_kind": "analysis",
+        "author_stance": "critical",
+        "audience_fit": "适合想快速判断的人",
+        "save_worthy_points": ["记住这点", "再想想这个影响"],
+        "author_thesis": "结论先说：这个观点站得住，但条件很多。",
+        "evidence_backed_points": [
+            {
+                "id": "ep-1",
+                "title": "为什么作者会这么判断？",
+                "details": "因为文本里给出了直接证据与案例。",
+                "evidence_segment_ids": ["e1"],
+            },
+            {
+                "id": "ep-2",
+                "title": "最有力的支撑是什么？",
+                "details": "关键在于它把现象和机制连在了一起。",
+                "evidence_segment_ids": ["e2"],
+            },
+        ],
+        "interpretive_points": [
+            {
+                "id": "ip-1",
+                "statement": "如果这个判断成立，后续决策会更保守。",
+                "kind": "implication",
+                "evidence_segment_ids": ["e1"],
+            }
+        ],
+        "what_is_new": "它把熟悉的问题换了一个更有解释力的角度。",
+        "tensions": ["证据支持方向明确，但外推仍有风险。"],
+        "uncertainties": ["外部条件变化时是否还成立？"],
+        "verification_items": [],
+    }
+
+    result = _build_structured_result(
+        payload,
+        reader_payload={"chapter_map": []},
+        requested_mode="auto",
+        resolved_mode="argument",
+        mode_confidence=0.72,
+    )
+
+    assert result.product_view is not None
+    assert result.product_view["hero"]["title"] == "结论先说：这个观点站得住，但条件很多。"
+    assert result.product_view["hero"]["dek"] == "一句话解释核心判断。"
+    assert result.product_view["hero"]["bottom_line"] == "实际 takeaway 在这里。"
+    assert any(section["kind"] == "question_block" for section in result.product_view["sections"])
+    assert result.product_view["sections"][-1]["kind"] == "reader_value"
+    assert result.product_view["sections"][-1]["title"] == "这对我意味着什么？"
+    assert result.product_view["render_hints"]["layout_family"] == "analysis_brief"
+
+
 def test_build_structured_result_guide_mode_builds_editorial() -> None:
     from content_ingestion.pipeline.llm_pipeline import _build_structured_result
 

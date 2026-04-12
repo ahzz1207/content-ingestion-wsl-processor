@@ -867,7 +867,9 @@ Required fields:
 Rules:
 - Use only evidence_segment_ids from the evidence_segments list.
 - Do not invent evidence ids.
-- Keep interpretive points separate from evidence-backed points."""
+- Keep interpretive points separate from evidence-backed points.
+
+LANGUAGE: All text output fields (core_summary, bottom_line, author_thesis, evidence_backed_points titles/details, interpretive_points, what_is_new, tensions, uncertainties, audience_fit, save_worthy_points, verification_items claims/rationale) MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
 
 
 def _synthesizer_instructions_guide() -> str:
@@ -886,7 +888,9 @@ Required fields:
 - tips
 - pitfalls
 - prerequisites
-- quick_win"""
+- quick_win
+
+LANGUAGE: All text output fields MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
 
 
 def _synthesizer_instructions_review() -> str:
@@ -905,7 +909,9 @@ Required fields:
 - style_and_mood
 - what_stands_out
 - who_it_is_for
-- reservation_points"""
+- reservation_points
+
+LANGUAGE: All text output fields MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
 
 
 def _synthesizer_instructions_for_mode(resolved_mode: str) -> str:

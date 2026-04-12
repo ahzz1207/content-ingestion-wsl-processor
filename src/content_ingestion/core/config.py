@@ -109,7 +109,7 @@ def load_settings() -> Settings:
         analysis_model=analysis_model,
         multimodal_model=multimodal_model,
         llm_max_evidence_segments=int(os.getenv("CONTENT_INGESTION_LLM_MAX_EVIDENCE_SEGMENTS", "200")),
-        whisper_timeout_seconds=int(os.getenv("CONTENT_INGESTION_WHISPER_TIMEOUT_SECONDS", "300")),
+        whisper_timeout_seconds=int(os.getenv("CONTENT_INGESTION_WHISPER_TIMEOUT_SECONDS", "600")),
         watcher_interval_seconds=int(os.getenv("CONTENT_INGESTION_WATCHER_INTERVAL_SECONDS", "2")),
         bilibili_whisper_model=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_MODEL", "medium"),
         bilibili_whisper_language=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_LANGUAGE") or None,

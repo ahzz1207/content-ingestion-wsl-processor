@@ -29,6 +29,7 @@ from content_ingestion.pipeline.llm_contract import (
     build_reader_envelope,
     build_synthesizer_envelope,
     build_text_analysis_envelope,
+    _image_data_url,
 )
 
 
@@ -301,6 +302,17 @@ _MODE_SCHEMA = {
     "guide": GUIDE_ANALYSIS_SCHEMA,
     "review": REVIEW_ANALYSIS_SCHEMA,
 }
+IMAGE_ANALYSIS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "resolved_mode": {"type": "string", "enum": ["argument", "guide", "review"]},
+        "author_thesis": {"type": "string"},
+    },
+    "required": [*_SHARED_EDITORIAL_REQUIRED, "resolved_mode", "author_thesis"],
+}
+
 
 
 def analyze_asset(
@@ -310,6 +322,10 @@ def analyze_asset(
     settings: Settings,
     requested_mode: str = "auto",
 ) -> LlmAnalysisResult:
+    # Image-only path: skip Reader/Synthesizer passes, run single multimodal call
+    if asset.content_shape == "image":
+        return _analyze_image_asset(job_dir=job_dir, asset=asset, settings=settings)
+
     text_envelope = build_text_analysis_envelope(
         asset=asset,
         job_dir=job_dir,
@@ -1632,3 +1648,161 @@ def _filter_valid_evidence_ids(
             continue
         filtered.append(normalized)
     return filtered
+
+
+def _image_analysis_instructions() -> str:
+    return """你是一位内容分析专家。你将收到一张图片，请仔细分析其内容并给出结构化的分析结果。
+
+任务：
+1. 判断图片内容最适合哪种分析模式（resolved_mode）：
+   - argument：观点分析、议题讨论、评述类内容
+   - guide：教程、操作指南、流程说明类内容
+   - review：评测、推荐、品鉴类内容
+2. 提炼图片核心信息，填写所有文本字段。
+
+规则：
+- 所有文本字段必须用中文填写
+- core_summary：对图片内容的一句话核心概括
+- bottom_line：读者最应该记住的一个判断或结论
+- author_thesis：图片表达的核心论点或主题
+- audience_fit：这张图最适合谁看
+- save_worthy_points：3-5个值得记录的要点
+- content_kind：article/opinion/analysis/report/tutorial/review/news
+- author_stance：objective/advocacy/critical/skeptical/promotional/explanatory/mixed
+
+LANGUAGE: 所有文本字段必须用中文填写。"""
+
+
+def _analyze_image_asset(
+    *,
+    job_dir: Path,
+    asset: ContentAsset,
+    settings: Settings,
+) -> LlmAnalysisResult:
+    """Single multimodal LLM pass for image-only content. Skips Reader/Synthesizer passes."""
+    result = LlmAnalysisResult(
+        status="pass",
+        provider=settings.llm_provider,
+        base_url=settings.openai_base_url,
+        schema_mode="json_schema",
+        analysis_model=settings.multimodal_model or settings.analysis_model,
+        steps=[
+            {"name": "resolve_openai_api_key", "status": "success", "details": "api key available"},
+            {"name": "load_openai_sdk", "status": "success", "details": "openai package available"},
+        ],
+    )
+
+    frame_paths = _collect_frame_paths(job_dir, asset)
+    if not frame_paths:
+        result.status = "skipped"
+        result.skip_reason = "no image attachment found"
+        result.steps.append({"name": "image_analysis", "status": "skipped", "details": "no analysis_frame attachment"})
+        return result
+
+    client = _create_client(settings)
+    model = settings.multimodal_model or settings.analysis_model
+    analysis_dir = job_dir / "analysis" / "llm"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+
+    text_context = json.dumps(
+        {"task": "analyze_image", "source_url": asset.source_url, "title": asset.title or ""},
+        ensure_ascii=False,
+    )
+    content_parts: list[dict] = [{"type": "input_text", "text": text_context}]
+    for frame_path in frame_paths[:1]:
+        content_parts.append({"type": "input_image", "image_url": _image_data_url(frame_path)})
+    input_payload = [{"role": "user", "content": content_parts}]
+
+    try:
+        payload = _call_structured_response(
+            client=client,
+            model=model,
+            instructions=_image_analysis_instructions(),
+            input_payload=input_payload,
+            schema_name="image_analysis",
+            schema=IMAGE_ANALYSIS_SCHEMA,
+        )
+    except Exception as exc:
+        result.status = "skipped"
+        result.skip_reason = f"image analysis LLM call failed: {exc}"
+        result.steps.append({"name": "image_analysis", "status": "skipped", "details": str(exc)})
+        return result
+
+    (analysis_dir / "image_analysis_result.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    result.steps.append({"name": "image_analysis", "status": "success", "details": model})
+
+    resolved_mode = str(payload.get("resolved_mode") or "argument")
+    result.resolved_mode = resolved_mode
+    result.requested_mode = "auto"
+    result.mode_confidence = 1.0
+
+    content_kind = str(payload.get("content_kind") or "").strip() or None
+    author_stance = str(payload.get("author_stance") or "").strip() or None
+    editorial_base = EditorialBase(
+        core_summary=str(payload.get("core_summary") or ""),
+        bottom_line=str(payload.get("bottom_line") or ""),
+        audience_fit=str(payload.get("audience_fit") or ""),
+        save_worthy_points=list(payload.get("save_worthy_points") or []),
+    )
+    mode_payload: dict = {"author_thesis": str(payload.get("author_thesis") or "")}
+    product_view = _build_product_view(resolved_mode, editorial_base, mode_payload)
+
+    structured_result = StructuredResult(
+        content_kind=content_kind,
+        author_stance=author_stance,
+        editorial=EditorialResult(
+            requested_mode="auto",
+            resolved_mode=resolved_mode,
+            mode_confidence=1.0,
+            base=editorial_base,
+            mode_payload=mode_payload,
+        ),
+        product_view=product_view,
+    )
+    result.structured_result = structured_result
+    result.content_kind = content_kind
+    result.author_stance = author_stance
+    result.summary = editorial_base.core_summary
+
+    insight_card_path = None
+    if settings.image_card_model:
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+            from content_ingestion.pipeline.visual_summary import generate_visual_summary
+            image_api_key = settings.image_card_api_key or settings.openai_api_key
+            image_base_url = settings.image_card_base_url or "https://zenmux.ai/api/vertex-ai"
+            image_client = genai.Client(
+                api_key=image_api_key, vertexai=True,
+                http_options=genai_types.HttpOptions(api_version="v1", base_url=image_base_url),
+            )
+            card_output = job_dir / "analysis" / "insight_card.png"
+            card_step = generate_visual_summary(
+                client=image_client, model=settings.image_card_model,
+                structured_result=structured_result, resolved_mode=resolved_mode,
+                asset_title=asset.title or "", output_path=card_output,
+            )
+            result.steps.append(card_step)
+            if card_step["status"] == "success":
+                insight_card_path = card_output.relative_to(job_dir).as_posix()
+        except Exception as exc:
+            result.warnings.append(f"Visual summary card skipped: {exc}")
+
+    output_path = analysis_dir / "analysis_result.json"
+    output_path.write_text(
+        json.dumps({
+            "status": result.status,
+            "resolved_mode": result.resolved_mode,
+            "requested_mode": result.requested_mode,
+            "result": _serialize_structured_result(result.structured_result),
+            "summary": result.summary,
+            "insight_card_path": insight_card_path,
+            "warnings": result.warnings,
+            "steps": result.steps,
+        }, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    result.output_path = output_path.relative_to(job_dir).as_posix()
+    return result

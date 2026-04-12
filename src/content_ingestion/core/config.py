@@ -32,6 +32,7 @@ class Settings:
     bilibili_whisper_language: str | None
     llm_max_content_chars: int
     image_card_model: str | None
+    image_card_api_key: str | None
     image_card_base_url: str | None
 
 
@@ -80,6 +81,7 @@ def load_settings() -> Settings:
     if multimodal_model is None:
         multimodal_model = analysis_model
     image_card_model = _read_first_env("CONTENT_INGESTION_IMAGE_CARD_MODEL")
+    image_card_api_key = _read_first_env("CONTENT_INGESTION_IMAGE_CARD_API_KEY")
     image_card_base_url = _read_first_env("CONTENT_INGESTION_IMAGE_CARD_BASE_URL")
 
     settings = Settings(
@@ -113,6 +115,7 @@ def load_settings() -> Settings:
         bilibili_whisper_language=os.getenv("CONTENT_INGESTION_BILIBILI_WHISPER_LANGUAGE") or None,
         llm_max_content_chars=int(os.getenv("CONTENT_INGESTION_LLM_MAX_CONTENT_CHARS", "40000")),
         image_card_model=image_card_model,
+        image_card_api_key=image_card_api_key,
         image_card_base_url=image_card_base_url,
     )
     settings.data_dir.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,13 @@
 """Visual summary card generation — produces a single insight card image.
 
-Calls the OpenAI responses API with image output to generate a visual
-summary of the analysis result. The card style adapts to the resolved
+Calls the Google GenAI SDK (via Zenmux Vertex AI endpoint) to generate a
+visual summary of the analysis result. The card style adapts to the resolved
 analysis mode (argument / guide / review).
 """
 
 from __future__ import annotations
 
 import base64
-import importlib
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -34,14 +32,21 @@ def generate_visual_summary(
 ) -> dict[str, object]:
     """Generate an insight card image and write it to *output_path*.
 
+    *client* must be a ``google.genai.Client`` instance configured with
+    the Zenmux Vertex AI endpoint.
+
     Returns a pipeline step dict suitable for ``result.steps``.
     """
+    from google.genai import types
+
     prompt = _build_visual_prompt(structured_result, resolved_mode, asset_title)
 
-    response = client.responses.create(
+    response = client.models.generate_content(
         model=model,
-        input=prompt,
-        tools=[{"type": "image_generation", "size": "1024x1536", "quality": "high"}],
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_modalities=["IMAGE", "TEXT"],
+        ),
     )
 
     image_data = _extract_image_bytes(response)
@@ -65,12 +70,16 @@ def generate_visual_summary(
 
 
 def _extract_image_bytes(response) -> bytes | None:
-    """Walk the response output list looking for an image_generation_call result."""
-    for item in response.output:
-        if getattr(item, "type", None) == "image_generation_call":
-            b64 = getattr(item, "result", None)
-            if b64:
-                return base64.b64decode(b64)
+    """Walk the GenAI response parts looking for inline image data."""
+    try:
+        for part in response.candidates[0].content.parts:
+            if part.inline_data is not None:
+                data = part.inline_data.data
+                if isinstance(data, bytes):
+                    return data
+                return base64.b64decode(data)
+    except (AttributeError, IndexError):
+        pass
     return None
 
 

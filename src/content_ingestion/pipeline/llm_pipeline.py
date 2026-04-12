@@ -563,13 +563,18 @@ def analyze_asset(
     insight_card_path = None
     if settings.image_card_model:
         try:
-            image_client_kwargs = {"api_key": settings.openai_api_key}
-            if settings.image_card_base_url:
-                image_client_kwargs["base_url"] = settings.image_card_base_url
-            elif settings.openai_base_url:
-                image_client_kwargs["base_url"] = settings.openai_base_url
-            openai_module = importlib.import_module("openai")
-            image_client = openai_module.OpenAI(**image_client_kwargs)
+            from google import genai
+            from google.genai import types as genai_types
+            image_api_key = settings.image_card_api_key or settings.openai_api_key
+            image_base_url = settings.image_card_base_url or "https://zenmux.ai/api/vertex-ai"
+            image_client = genai.Client(
+                api_key=image_api_key,
+                vertexai=True,
+                http_options=genai_types.HttpOptions(
+                    api_version="v1",
+                    base_url=image_base_url,
+                ),
+            )
             card_output = job_dir / "analysis" / "insight_card.png"
             card_step = generate_visual_summary(
                 client=image_client,

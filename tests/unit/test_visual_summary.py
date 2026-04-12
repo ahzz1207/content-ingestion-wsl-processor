@@ -115,36 +115,41 @@ class TestBuildVisualPrompt:
         assert "段落内容" in prompt
 
 
+def _make_genai_response(image_bytes: bytes | None):
+    """Build a mock google.genai response with optional inline image data."""
+    if image_bytes is None:
+        part = SimpleNamespace(inline_data=None)
+    else:
+        part = SimpleNamespace(inline_data=SimpleNamespace(data=image_bytes))
+    content = SimpleNamespace(parts=[part])
+    candidate = SimpleNamespace(content=content)
+    return SimpleNamespace(candidates=[candidate])
+
+
 class TestExtractImageBytes:
     def test_extracts_base64_image(self):
         raw_bytes = b"PNG_IMAGE_DATA_HERE"
-        b64 = base64.b64encode(raw_bytes).decode()
-        item = SimpleNamespace(type="image_generation_call", result=b64)
-        response = SimpleNamespace(output=[item])
+        response = _make_genai_response(raw_bytes)
 
         extracted = _extract_image_bytes(response)
         assert extracted == raw_bytes
 
     def test_returns_none_when_no_image(self):
-        item = SimpleNamespace(type="message", content="text only")
-        response = SimpleNamespace(output=[item])
-
+        response = _make_genai_response(None)
         assert _extract_image_bytes(response) is None
 
     def test_returns_none_for_empty_output(self):
-        response = SimpleNamespace(output=[])
+        response = SimpleNamespace(candidates=[])
         assert _extract_image_bytes(response) is None
 
 
 class TestGenerateVisualSummary:
     def test_writes_png_on_success(self, tmp_path):
         raw_bytes = b"\x89PNG_TEST_DATA"
-        b64 = base64.b64encode(raw_bytes).decode()
-        image_item = SimpleNamespace(type="image_generation_call", result=b64)
-        mock_response = SimpleNamespace(output=[image_item])
+        mock_response = _make_genai_response(raw_bytes)
 
         client = MagicMock()
-        client.responses.create.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         editorial = _make_editorial("argument", {"author_thesis": "论点"})
         result = _make_result(editorial=editorial)
@@ -163,14 +168,13 @@ class TestGenerateVisualSummary:
         assert step["name"] == "visual_summary_card"
         assert output.exists()
         assert output.read_bytes() == raw_bytes
-        client.responses.create.assert_called_once()
+        client.models.generate_content.assert_called_once()
 
     def test_returns_skipped_when_no_image(self, tmp_path):
-        text_item = SimpleNamespace(type="message", content="no image")
-        mock_response = SimpleNamespace(output=[text_item])
+        mock_response = _make_genai_response(None)
 
         client = MagicMock()
-        client.responses.create.return_value = mock_response
+        client.models.generate_content.return_value = mock_response
 
         result = _make_result(editorial=_make_editorial("argument", {}))
         output = tmp_path / "insight_card.png"

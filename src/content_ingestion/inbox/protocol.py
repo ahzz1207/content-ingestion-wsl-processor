@@ -20,7 +20,11 @@ NORMALIZED_JSON_FILENAME = "normalized.json"
 NORMALIZED_MD_FILENAME = "normalized.md"
 CAPTURE_MANIFEST_FILENAME = "capture_manifest.json"
 ATTACHMENTS_DIRNAME = "attachments"
-PAYLOAD_FILENAMES = ("payload.html", "payload.txt", "payload.md")
+PAYLOAD_FILENAMES = (
+    "payload.html", "payload.txt", "payload.md",
+    "payload.pdf",
+    "payload.png", "payload.jpg", "payload.jpeg", "payload.webp", "payload.gif",
+)
 REQUIRED_METADATA_FIELDS = ("job_id", "source_url", "collector", "collected_at", "content_type")
 logger = logging.getLogger(__name__)
 

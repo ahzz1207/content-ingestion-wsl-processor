@@ -69,6 +69,7 @@ ARGUMENT_ANALYSIS_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "hero_title": {"type": "string"},
         "author_thesis": {"type": "string"},
         "evidence_backed_points": {
             "type": "array",
@@ -105,6 +106,7 @@ ARGUMENT_ANALYSIS_SCHEMA = {
     },
     "required": [
         *_SHARED_EDITORIAL_REQUIRED,
+        "hero_title",
         "author_thesis",
         "evidence_backed_points",
         "interpretive_points",
@@ -876,6 +878,7 @@ Required fields:
 - author_stance
 - audience_fit
 - save_worthy_points
+- hero_title
 - author_thesis
 - evidence_backed_points
 - interpretive_points
@@ -888,8 +891,10 @@ Rules:
 - Use only evidence_segment_ids from the evidence_segments list.
 - Do not invent evidence ids.
 - Keep interpretive points separate from evidence-backed points.
+- hero_title: 7-20个汉字的短标签，作为论点的精炼标题。不是完整句子，不重复author_thesis的措辞。例如AI监管的代价、增长幻觉。
+- author_thesis: 完整的论点陈述句，作为正文dek展示。
 
-LANGUAGE: All text output fields (core_summary, bottom_line, author_thesis, evidence_backed_points titles/details, interpretive_points, what_is_new, tensions, uncertainties, audience_fit, save_worthy_points, verification_items claims/rationale) MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
+LANGUAGE: All text output fields (core_summary, bottom_line, hero_title, author_thesis, evidence_backed_points titles/details, interpretive_points, what_is_new, tensions, uncertainties, audience_fit, save_worthy_points, verification_items claims/rationale) MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
 
 
 def _synthesizer_instructions_guide() -> str:
@@ -1231,8 +1236,10 @@ def _build_argument_product_view(
     editorial_base: EditorialBase,
     mode_payload: dict[str, object],
 ) -> dict[str, object] | None:
-    hero_title = str(mode_payload.get("author_thesis") or editorial_base.core_summary or editorial_base.bottom_line).strip()
-    hero_dek = editorial_base.core_summary.strip()
+    _raw_hero_title = str(mode_payload.get("hero_title") or "").strip()
+    _author_thesis = str(mode_payload.get("author_thesis") or "").strip()
+    hero_title = _raw_hero_title or (_author_thesis[:20] if _author_thesis else editorial_base.core_summary or editorial_base.bottom_line)
+    hero_dek = _author_thesis or editorial_base.core_summary.strip()
     hero_bottom_line = editorial_base.bottom_line.strip()
 
     sections: list[dict[str, object]] = []
@@ -1385,6 +1392,7 @@ def _build_editorial_mode_payload(resolved_mode: str, payload: dict[str, object]
             "reservation_points": [str(item).strip() for item in payload.get("reservation_points", []) if str(item).strip()],
         }
     return {
+        "hero_title": str(payload.get("hero_title") or "").strip(),
         "author_thesis": str(payload.get("author_thesis") or "").strip(),
         "evidence_backed_points": [
             {

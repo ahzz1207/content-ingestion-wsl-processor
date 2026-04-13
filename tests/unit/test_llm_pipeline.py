@@ -359,6 +359,7 @@ def test_build_structured_result_argument_mode_builds_product_view() -> None:
         "author_stance": "critical",
         "audience_fit": "适合想快速判断的人",
         "save_worthy_points": ["记住这点", "再想想这个影响"],
+        "hero_title": "论点的条件性",
         "author_thesis": "结论先说：这个观点站得住，但条件很多。",
         "evidence_backed_points": [
             {
@@ -397,8 +398,8 @@ def test_build_structured_result_argument_mode_builds_product_view() -> None:
     )
 
     assert result.product_view is not None
-    assert result.product_view["hero"]["title"] == "结论先说：这个观点站得住，但条件很多。"
-    assert result.product_view["hero"]["dek"] == "一句话解释核心判断。"
+    assert result.product_view["hero"]["title"] == "论点的条件性"
+    assert result.product_view["hero"]["dek"] == "结论先说：这个观点站得住，但条件很多。"
     assert result.product_view["hero"]["bottom_line"] == "实际 takeaway 在这里。"
     assert any(section["kind"] == "question_block" for section in result.product_view["sections"])
     assert result.product_view["sections"][-1]["kind"] == "reader_value"

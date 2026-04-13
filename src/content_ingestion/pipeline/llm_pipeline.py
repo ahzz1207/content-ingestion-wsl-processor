@@ -122,6 +122,7 @@ GUIDE_ANALYSIS_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "hero_title": {"type": "string"},
         "guide_goal": {"type": "string"},
         "recommended_steps": {"type": "array", "items": {"type": "string"}},
         "tips": {"type": "array", "items": {"type": "string"}},
@@ -131,6 +132,7 @@ GUIDE_ANALYSIS_SCHEMA = {
     },
     "required": [
         *_SHARED_EDITORIAL_REQUIRED,
+        "hero_title",
         "guide_goal",
         "recommended_steps",
         "tips",
@@ -145,6 +147,7 @@ REVIEW_ANALYSIS_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         **_SHARED_EDITORIAL_SCHEMA_PROPS,
+        "hero_title": {"type": "string"},
         "overall_judgment": {"type": "string"},
         "highlights": {"type": "array", "items": {"type": "string"}},
         "style_and_mood": {"type": "string"},
@@ -154,6 +157,7 @@ REVIEW_ANALYSIS_SCHEMA = {
     },
     "required": [
         *_SHARED_EDITORIAL_REQUIRED,
+        "hero_title",
         "overall_judgment",
         "highlights",
         "style_and_mood",
@@ -908,12 +912,17 @@ Required fields:
 - author_stance
 - audience_fit
 - save_worthy_points
+- hero_title
 - guide_goal
 - recommended_steps
 - tips
 - pitfalls
 - prerequisites
 - quick_win
+
+Rules:
+- hero_title: 7-20个汉字的短标签，作为指南的精炼标题，不是完整句子，不重复guide_goal措辞。例如零基础入门PyTorch、快速调优指南。
+- guide_goal: 完整的目标描述句，作为正文dek展示。
 
 LANGUAGE: All text output fields MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
 
@@ -929,12 +938,17 @@ Required fields:
 - author_stance
 - audience_fit
 - save_worthy_points
+- hero_title
 - overall_judgment
 - highlights
 - style_and_mood
 - what_stands_out
 - who_it_is_for
 - reservation_points
+
+Rules:
+- hero_title: 7-20个汉字的短标签，作为评测的精炼标题，不是完整句子，不重复overall_judgment措辞。例如值得一读的深度报告、被高估的爆款书。
+- overall_judgment: 完整的评价判断句，作为正文dek展示。
 
 LANGUAGE: All text output fields MUST be written in Simplified Chinese. Do not use English for any user-facing text field."""
 
@@ -1289,8 +1303,9 @@ def _build_guide_product_view(
     mode_payload: dict[str, object],
 ) -> dict[str, object] | None:
     guide_goal = str(mode_payload.get("guide_goal") or "").strip()
-    hero_title = guide_goal or editorial_base.core_summary.strip()
-    hero_dek = editorial_base.core_summary.strip()
+    _raw_hero_title = str(mode_payload.get("hero_title") or "").strip()
+    hero_title = _raw_hero_title or (guide_goal[:20] if guide_goal else editorial_base.core_summary.strip())
+    hero_dek = guide_goal or editorial_base.core_summary.strip()
     quick_win = str(mode_payload.get("quick_win") or "").strip()
     hero_bottom_line = quick_win or editorial_base.bottom_line.strip()
 
@@ -1334,8 +1349,9 @@ def _build_review_product_view(
     mode_payload: dict[str, object],
 ) -> dict[str, object] | None:
     overall_judgment = str(mode_payload.get("overall_judgment") or "").strip()
-    hero_title = overall_judgment or editorial_base.core_summary.strip()
-    hero_dek = editorial_base.core_summary.strip()
+    _raw_hero_title = str(mode_payload.get("hero_title") or "").strip()
+    hero_title = _raw_hero_title or (overall_judgment[:20] if overall_judgment else editorial_base.core_summary.strip())
+    hero_dek = overall_judgment or editorial_base.core_summary.strip()
     hero_bottom_line = editorial_base.bottom_line.strip()
 
     sections: list[dict[str, object]] = []
@@ -1375,6 +1391,7 @@ def _build_review_product_view(
 def _build_editorial_mode_payload(resolved_mode: str, payload: dict[str, object]) -> dict[str, object]:
     if resolved_mode == "guide":
         return {
+            "hero_title": str(payload.get("hero_title") or "").strip(),
             "guide_goal": str(payload.get("guide_goal") or "").strip(),
             "recommended_steps": [str(item).strip() for item in payload.get("recommended_steps", []) if str(item).strip()],
             "tips": [str(item).strip() for item in payload.get("tips", []) if str(item).strip()],
@@ -1384,6 +1401,7 @@ def _build_editorial_mode_payload(resolved_mode: str, payload: dict[str, object]
         }
     if resolved_mode == "review":
         return {
+            "hero_title": str(payload.get("hero_title") or "").strip(),
             "overall_judgment": str(payload.get("overall_judgment") or "").strip(),
             "highlights": [str(item).strip() for item in payload.get("highlights", []) if str(item).strip()],
             "style_and_mood": str(payload.get("style_and_mood") or "").strip(),

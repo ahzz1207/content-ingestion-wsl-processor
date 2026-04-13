@@ -421,6 +421,7 @@ def test_build_structured_result_guide_mode_builds_product_view() -> None:
         "author_stance": "explanatory",
         "audience_fit": "players",
         "save_worthy_points": ["tip-1"],
+        "hero_title": "入门Y的捷径",
         "guide_goal": "learn Y",
         "recommended_steps": ["Step 1", "Step 2", "Step 3"],
         "tips": ["Tip A", "Tip B"],
@@ -438,7 +439,8 @@ def test_build_structured_result_guide_mode_builds_product_view() -> None:
     )
 
     assert result.product_view is not None
-    assert result.product_view["hero"]["title"] == "learn Y"
+    assert result.product_view["hero"]["title"] == "入门Y的捷径"
+    assert result.product_view["hero"]["dek"] == "learn Y"
     assert result.product_view["hero"]["bottom_line"] == "Start with stage 1"
     assert result.product_view["layout"] == "practical_guide"
     assert result.product_view["render_hints"]["layout_family"] == "practical_guide"
@@ -459,6 +461,7 @@ def test_build_structured_result_review_mode_builds_product_view() -> None:
         "author_stance": "mixed",
         "audience_fit": "fans of ambient music",
         "save_worthy_points": ["highlight-1"],
+        "hero_title": "值得一听的环境音乐",
         "overall_judgment": "excellent",
         "highlights": ["Great production", "Beautiful textures"],
         "style_and_mood": "warm and spacious",
@@ -476,7 +479,8 @@ def test_build_structured_result_review_mode_builds_product_view() -> None:
     )
 
     assert result.product_view is not None
-    assert result.product_view["hero"]["title"] == "excellent"
+    assert result.product_view["hero"]["title"] == "值得一听的环境音乐"
+    assert result.product_view["hero"]["dek"] == "excellent"
     assert result.product_view["layout"] == "review_curation"
     assert result.product_view["render_hints"]["layout_family"] == "review_curation"
     assert any(s["kind"] == "highlight_block" for s in result.product_view["sections"])
@@ -498,6 +502,7 @@ def test_build_structured_result_guide_mode_builds_editorial() -> None:
         "author_stance": "explanatory",
         "audience_fit": "players",
         "save_worthy_points": ["tip-1"],
+        "hero_title": "入门Y的捷径",
         "guide_goal": "learn Y",
         "recommended_steps": ["Step 1", "Step 2"],
         "tips": ["Tip A"],
@@ -530,6 +535,7 @@ def test_build_structured_result_review_mode_builds_editorial() -> None:
         "author_stance": "mixed",
         "audience_fit": "fans of ambient music",
         "save_worthy_points": ["highlight-1"],
+        "hero_title": "值得一听的环境音乐",
         "overall_judgment": "excellent",
         "highlights": ["Great production"],
         "style_and_mood": "warm and spacious",

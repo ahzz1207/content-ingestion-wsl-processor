@@ -516,7 +516,11 @@ def analyze_asset(
     if structured_result.synthesis is not None:
         result.synthesis = structured_result.synthesis.final_answer.strip()
 
-    frame_paths = _collect_frame_paths(job_dir, asset)
+    # Skip multimodal frame verification for local platform assets (PDF/text).
+    # Page-image frames from PDF parsers duplicate text already extracted by the
+    # Reader pass; sending them again wastes 2-4 min and adds no signal.
+    _is_local = str(getattr(asset, "source_platform", "") or "").lower() == "local"
+    frame_paths = [] if _is_local else _collect_frame_paths(job_dir, asset)
     if frame_paths:
         multimodal_envelope = build_multimodal_verification_envelope(
             asset=asset,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import importlib
 import importlib.util
 import json
@@ -9,6 +11,9 @@ from typing import Any
 
 from content_ingestion.core.config import Settings
 from content_ingestion.pipeline.visual_summary import generate_visual_summary
+
+logger = logging.getLogger(__name__)
+
 from content_ingestion.core.models import (
     AnalysisItem,
     ChapterEntry,
